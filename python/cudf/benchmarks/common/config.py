@@ -48,6 +48,10 @@ else:
     def pytest_collection_modifyitems(session, config, items):
         pass
 
+    import rmm
+    size = 12_000_000_000
+    rmm.reinitialize(pool_allocator=True, initial_pool_size=size)
+
 
 def pytest_sessionstart(session):
     """Add the common files to the path for all tests to import."""
@@ -65,5 +69,6 @@ if "CUDF_BENCHMARKS_DEBUG_ONLY" in os.environ:
     NUM_ROWS = [10, 20]
     NUM_COLS = [1, 6]
 else:
-    NUM_ROWS = [100, 10_000, 1_000_000]
+    NUM_ROWS = [1_000_000, 10_000_000]
     NUM_COLS = [1, 6]
+

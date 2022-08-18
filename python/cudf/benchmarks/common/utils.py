@@ -253,5 +253,6 @@ def collapse_fixtures(fixtures, pattern, repl, globals_, idfunc=None):
 random_state = cupy.random.RandomState(42)
 column_generators = {
     "int": (lambda nr: random_state.randint(low=0, high=100, size=nr)),
+    "inthc": (lambda nr: random_state.randint(low=0, high=nr**0.5, size=nr)),
     "float": (lambda nr: random_state.rand(nr)),
 }
