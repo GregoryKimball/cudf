@@ -48,7 +48,14 @@ def bench_values(benchmark, frame_or_index):
 
 @benchmark_with_object(cls="frame_or_index", dtype="int")
 def bench_nunique(benchmark, frame_or_index):
-    benchmark(frame_or_index.nunique)
+    @benchmark
+    def func():
+        if hasattr(frame_or_index, '_column'):
+            frame_or_index._column._distinct_count = {}
+        elif hasattr(frame_or_index, '_columns'):
+            for c in frame_or_index._columns:
+                c._distinct_count = {}
+        frame_or_index.nunique()
 
 
 @benchmark_with_object(cls="frame_or_index", dtype="int", nulls=False)
