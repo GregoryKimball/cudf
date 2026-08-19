@@ -163,11 +163,13 @@ struct groupby_context_t {
  * @param source_info The source of the parquet file
  * @param columns The columns to read
  * @param predicate The filter predicate to pushdown
+ * @param output_dict_columns Whether to return flat string columns as DICTIONARY32
  */
 [[nodiscard]] std::unique_ptr<table_with_names> read_parquet(
   cudf::io::source_info const& source_info,
   std::vector<std::string> const& columns                = {},
-  std::unique_ptr<cudf::ast::operation> const& predicate = nullptr);
+  std::unique_ptr<cudf::ast::operation> const& predicate = nullptr,
+  bool output_dict_columns                               = false);
 
 /**
  * @brief Generate the `std::tm` structure from year, month, and day

@@ -129,6 +129,7 @@ ConfigureNVBench(NDSH_Q05_NVBENCH ndsh/q05.cpp ndsh/utilities.cpp)
 ConfigureNVBench(NDSH_Q06_NVBENCH ndsh/q06.cpp ndsh/utilities.cpp)
 ConfigureNVBench(NDSH_Q09_NVBENCH ndsh/q09.cpp ndsh/utilities.cpp)
 ConfigureNVBench(NDSH_Q10_NVBENCH ndsh/q10.cpp ndsh/utilities.cpp)
+ConfigureNVBench(NDSH_DICT_TRANSCODE_NVBENCH ndsh/dict_transcode.cpp ndsh/utilities.cpp)
 
 # ##################################################################################################
 # * filter benchmark -------------------------------------------------------------------

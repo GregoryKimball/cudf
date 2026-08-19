@@ -306,12 +306,14 @@ std::unique_ptr<table_with_names> apply_reduction(cudf::column_view const& colum
 std::unique_ptr<table_with_names> read_parquet(
   cudf::io::source_info const& source_info,
   std::vector<std::string> const& columns,
-  std::unique_ptr<cudf::ast::operation> const& predicate)
+  std::unique_ptr<cudf::ast::operation> const& predicate,
+  bool output_dict_columns)
 {
   CUDF_BENCHMARK_RANGE();
   auto builder = cudf::io::parquet_reader_options_builder(source_info);
   if (!columns.empty()) { builder.column_names(columns); }
   if (predicate) { builder.filter(*predicate); }
+  builder.output_dict_columns(output_dict_columns);
   auto const options       = builder.build();
   auto table_with_metadata = cudf::io::read_parquet(options);
   std::vector<std::string> column_names;
