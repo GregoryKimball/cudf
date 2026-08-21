@@ -21,13 +21,15 @@ namespace cudf::datagen {
  * @param num_rows The number of rows in the column
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate the returned column's device memory
+ * @param seed Seed used to initialize the random number generator
  */
 std::unique_ptr<cudf::column> generate_random_string_column(
   cudf::size_type lower,
   cudf::size_type upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
+  unsigned int seed                 = 0);
 
 /**
  * @brief Generate a column of random numbers
@@ -45,6 +47,7 @@ std::unique_ptr<cudf::column> generate_random_string_column(
  * @param num_rows The number of rows in the column
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate the returned column's device memory
+ * @param seed Seed used to initialize the random number generator
  */
 template <typename T>
 std::unique_ptr<cudf::column> generate_random_numeric_column(
@@ -52,7 +55,8 @@ std::unique_ptr<cudf::column> generate_random_numeric_column(
   T upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
+  unsigned int seed                 = 0);
 
 /**
  * @brief Generate a primary key column
@@ -107,12 +111,14 @@ std::unique_ptr<cudf::column> generate_repeat_string_column(
  * @param num_rows The number of rows in the column
  * @param stream CUDA stream used for device memory operations and kernel launches
  * @param mr Device memory resource used to allocate the returned column's device memory
+ * @param seed Seed used to initialize the random number generator
  */
 std::unique_ptr<cudf::column> generate_random_string_column_from_set(
   cudf::host_span<char const* const> set,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream      = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref(),
+  unsigned int seed                 = 0);
 
 /**
  * @brief Generate a column consisting of a repeating sequence of integers

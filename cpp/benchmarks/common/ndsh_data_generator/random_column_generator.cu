@@ -33,7 +33,10 @@ struct random_string_generator {
   thrust::default_random_engine engine;
   thrust::uniform_int_distribution<unsigned char> char_dist;
 
-  CUDF_HOST_DEVICE random_string_generator(char* c) : chars(c), char_dist(44, 122) {}
+  CUDF_HOST_DEVICE random_string_generator(char* c, unsigned int seed)
+    : chars(c), engine(seed), char_dist(44, 122)
+  {
+  }
 
   __device__ void operator()(cuda::std::tuple<int64_t, int64_t> str_begin_end)
   {
@@ -55,18 +58,22 @@ template <typename T>
 struct random_number_generator {
   T lower;
   T upper;
+  unsigned int seed;
 
-  CUDF_HOST_DEVICE random_number_generator(T lower, T upper) : lower(lower), upper(upper) {}
+  CUDF_HOST_DEVICE random_number_generator(T lower, T upper, unsigned int seed = 0)
+    : lower(lower), upper(upper), seed(seed)
+  {
+  }
 
   __device__ T operator()(int64_t const idx) const
   {
     if constexpr (cudf::is_integral<T>()) {
-      thrust::default_random_engine engine;
+      thrust::default_random_engine engine(seed);
       thrust::uniform_int_distribution<T> dist(lower, upper);
       engine.discard(idx);
       return dist(engine);
     } else {
-      thrust::default_random_engine engine;
+      thrust::default_random_engine engine(seed);
       thrust::uniform_real_distribution<T> dist(lower, upper);
       engine.discard(idx);
       return dist(engine);
@@ -80,14 +87,15 @@ std::unique_ptr<cudf::column> generate_random_string_column(cudf::size_type lowe
                                                             cudf::size_type upper,
                                                             cudf::size_type num_rows,
                                                             rmm::cuda_stream_view stream,
-                                                            rmm::device_async_resource_ref mr)
+                                                            rmm::device_async_resource_ref mr,
+                                                            unsigned int seed)
 {
   CUDF_BENCHMARK_RANGE();
   auto offsets_begin = cudf::detail::make_counting_transform_iterator(
-    0, random_number_generator<cudf::size_type>(lower, upper));
+    0, random_number_generator<cudf::size_type>(lower, upper, seed));
   auto [offsets_column, computed_bytes] = cudf::strings::detail::make_offsets_child_column(
     offsets_begin, offsets_begin + num_rows, stream, mr);
-  rmm::device_uvector<char> chars(computed_bytes, stream);
+  rmm::device_uvector<char> chars(computed_bytes, stream, mr);
 
   auto const offset_itr =
     cudf::detail::offsetalator_factory::make_input_iterator(offsets_column->view());
@@ -97,7 +105,7 @@ std::unique_ptr<cudf::column> generate_random_string_column(cudf::size_type lowe
   thrust::for_each_n(rmm::exec_policy_nosync(stream),
                      cuda::make_zip_iterator(cuda::std::make_tuple(offset_itr, offset_itr + 1)),
                      num_rows,
-                     random_string_generator(chars.data()));
+                     random_string_generator(chars.data(), seed));
 
   return cudf::make_strings_column(
     num_rows, std::move(offsets_column), chars.release(), 0, rmm::device_buffer{});
@@ -108,7 +116,8 @@ std::unique_ptr<cudf::column> generate_random_numeric_column(T lower,
                                                              T upper,
                                                              cudf::size_type num_rows,
                                                              rmm::cuda_stream_view stream,
-                                                             rmm::device_async_resource_ref mr)
+                                                             rmm::device_async_resource_ref mr,
+                                                             unsigned int seed)
 {
   CUDF_BENCHMARK_RANGE();
   auto col = cudf::make_numeric_column(
@@ -119,7 +128,7 @@ std::unique_ptr<cudf::column> generate_random_numeric_column(T lower,
                     cuda::counting_iterator{begin},
                     cuda::counting_iterator{end},
                     col->mutable_view().begin<T>(),
-                    random_number_generator<T>(lower, upper));
+                    random_number_generator<T>(lower, upper, seed));
   return col;
 }
 
@@ -128,28 +137,32 @@ template std::unique_ptr<cudf::column> generate_random_numeric_column<int8_t>(
   int8_t upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+  rmm::device_async_resource_ref mr,
+  unsigned int seed);
 
 template std::unique_ptr<cudf::column> generate_random_numeric_column<int16_t>(
   int16_t lower,
   int16_t upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+  rmm::device_async_resource_ref mr,
+  unsigned int seed);
 
 template std::unique_ptr<cudf::column> generate_random_numeric_column<cudf::size_type>(
   cudf::size_type lower,
   cudf::size_type upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+  rmm::device_async_resource_ref mr,
+  unsigned int seed);
 
 template std::unique_ptr<cudf::column> generate_random_numeric_column<double>(
   double lower,
   double upper,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr);
+  rmm::device_async_resource_ref mr,
+  unsigned int seed);
 
 std::unique_ptr<cudf::column> generate_primary_key_column(cudf::scalar const& start,
                                                           cudf::size_type num_rows,
@@ -174,7 +187,8 @@ std::unique_ptr<cudf::column> generate_random_string_column_from_set(
   cudf::host_span<char const* const> set,
   cudf::size_type num_rows,
   rmm::cuda_stream_view stream,
-  rmm::device_async_resource_ref mr)
+  rmm::device_async_resource_ref mr,
+  unsigned int seed)
 {
   CUDF_BENCHMARK_RANGE();
   // Build a gather map of random strings to choose from
@@ -186,7 +200,7 @@ std::unique_ptr<cudf::column> generate_random_string_column_from_set(
 
   // Build a column of random keys to gather from the set
   auto const gather_keys =
-    generate_random_numeric_column<int16_t>(0, set.size() - 1, num_rows, stream, mr);
+    generate_random_numeric_column<int16_t>(0, set.size() - 1, num_rows, stream, mr, seed);
 
   // Perform the gather operation
   auto const gathered_table = cudf::gather(
