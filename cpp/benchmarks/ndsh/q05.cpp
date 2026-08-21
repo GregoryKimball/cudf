@@ -6,6 +6,7 @@
 #include "utilities.hpp"
 
 #include <benchmarks/common/memory_stats.hpp>
+#include <benchmarks/common/nvtx_ranges.hpp>
 
 #include <cudf/ast/expressions.hpp>
 #include <cudf/binaryop.hpp>
@@ -79,9 +80,10 @@
   return revenue;
 }
 
-void run_ndsh_q5(nvbench::state& state,
-                 std::unordered_map<std::string, cuio_source_sink_pair>& sources)
+void run_ndsh_q5(nvbench::state& state, ndsh_data_sources& sources)
 {
+  auto const query_execution_range = cudf::benchmark::scoped_range{"query_execution"};
+
   // Define the column projection and filter predicate for the `orders` table
   std::vector<std::string> const orders_cols = {"o_custkey", "o_orderkey", "o_orderdate"};
   auto const o_orderdate_ref                 = cudf::ast::column_reference(std::distance(
@@ -156,9 +158,15 @@ void ndsh_q5(nvbench::state& state)
 {
   // Generate the required parquet files in device buffers
   double const scale_factor = state.get_float64("scale_factor");
-  std::unordered_map<std::string, cuio_source_sink_pair> sources;
-  generate_parquet_data_sources(
-    scale_factor, {"customer", "orders", "lineitem", "supplier", "nation", "region"}, sources);
+  auto const generation_mr  = state.get_string("generation_mr");
+  CUDF_EXPECTS(generation_mr == "managed" || generation_mr == "async",
+               "Unsupported generation memory resource");
+  ndsh_data_sources sources;
+  generate_parquet_data_sources(scale_factor,
+                                {"customer", "orders", "lineitem", "supplier", "nation", "region"},
+                                sources,
+                                false,
+                                generation_mr == "managed");
 
   auto stream = cudf::get_default_stream();
   state.set_cuda_stream(nvbench::make_cuda_stream_view(stream.value()));
@@ -169,4 +177,7 @@ void ndsh_q5(nvbench::state& state)
     mem_stats_logger.peak_memory_usage(), "peak_memory_usage", "peak_memory_usage");
 }
 
-NVBENCH_BENCH(ndsh_q5).set_name("ndsh_q5").add_float64_axis("scale_factor", {0.01, 0.1, 1});
+NVBENCH_BENCH(ndsh_q5)
+  .set_name("ndsh_q5")
+  .add_float64_axis("scale_factor", {0.01, 0.1, 1})
+  .add_string_axis("generation_mr", {"managed", "async"});

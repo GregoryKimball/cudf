@@ -5,12 +5,52 @@
 
 #pragma once
 
-#include "io/cuio_common.hpp"
-
 #include <cudf/groupby.hpp>
 #include <cudf/io/parquet.hpp>
 
 #include <rmm/device_uvector.hpp>
+
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+enum class join_algorithm { HASH, DIRECT };
+
+enum class direct_join_build_side { LEFT, RIGHT };
+
+/**
+ * @brief Host-backed Parquet source populated from an NDS-H device sink
+ */
+class ndsh_parquet_source {
+ public:
+  ndsh_parquet_source() = default;
+  ~ndsh_parquet_source();
+
+  ndsh_parquet_source(ndsh_parquet_source&& other) noexcept;
+  ndsh_parquet_source& operator=(ndsh_parquet_source&& other) noexcept;
+
+  ndsh_parquet_source(ndsh_parquet_source const&)            = delete;
+  ndsh_parquet_source& operator=(ndsh_parquet_source const&) = delete;
+
+  [[nodiscard]] cudf::io::source_info make_source_info() const;
+
+  void append_from_device(void const* device_data, std::size_t size, rmm::cuda_stream_view stream);
+
+ private:
+  struct pinned_buffer {
+    void* data;
+    std::size_t size;
+  };
+
+  std::vector<pinned_buffer> buffers_;
+};
+
+using ndsh_data_sources = std::unordered_map<std::string, ndsh_parquet_source>;
+
+/**
+ * @brief Convert a benchmark axis value to a join algorithm
+ */
+[[nodiscard]] join_algorithm parse_join_algorithm(std::string const& value);
 
 /**
  * @brief A class to represent a table with column names attached
@@ -72,13 +112,19 @@ class table_with_names {
  * @param left_on The columns to join on in the left table
  * @param right_on The columns to join on in the right table
  * @param compare_nulls The null equality policy
+ * @param algorithm The join implementation to use
+ * @param direct_build_side The input with distinct keys when using direct join
+ * @param direct_capacity The known exclusive upper bound for direct-join keys
  */
 [[nodiscard]] std::unique_ptr<cudf::table> join_and_gather(
   cudf::table_view const& left_input,
   cudf::table_view const& right_input,
   std::vector<cudf::size_type> const& left_on,
   std::vector<cudf::size_type> const& right_on,
-  cudf::null_equality compare_nulls);
+  cudf::null_equality compare_nulls,
+  join_algorithm algorithm                 = join_algorithm::HASH,
+  direct_join_build_side direct_build_side = direct_join_build_side::RIGHT,
+  std::size_t direct_capacity              = 0);
 
 /**
  * @brief Apply an inner join operation to two tables
@@ -88,13 +134,19 @@ class table_with_names {
  * @param left_on The columns to join on in the left table
  * @param right_on The columns to join on in the right table
  * @param compare_nulls The null equality policy
+ * @param algorithm The join implementation to use
+ * @param direct_build_side The input with distinct keys when using direct join
+ * @param direct_capacity The known exclusive upper bound for direct-join keys
  */
 [[nodiscard]] std::unique_ptr<table_with_names> apply_inner_join(
   std::unique_ptr<table_with_names> const& left_input,
   std::unique_ptr<table_with_names> const& right_input,
   std::vector<std::string> const& left_on,
   std::vector<std::string> const& right_on,
-  cudf::null_equality compare_nulls = cudf::null_equality::EQUAL);
+  cudf::null_equality compare_nulls        = cudf::null_equality::EQUAL,
+  join_algorithm algorithm                 = join_algorithm::HASH,
+  direct_join_build_side direct_build_side = direct_join_build_side::RIGHT,
+  std::size_t direct_capacity              = 0);
 
 /**
  * @brief Apply a filter predicate to a table
@@ -196,7 +248,7 @@ int32_t days_since_epoch(int year, int month, int day);
  */
 void write_to_parquet_device_buffer(std::unique_ptr<cudf::table> const& table,
                                     std::vector<std::string> const& col_names,
-                                    cuio_source_sink_pair& source);
+                                    ndsh_parquet_source& source);
 
 /**
  * @brief Generate NDS-H tables and write to parquet device buffers
@@ -204,7 +256,11 @@ void write_to_parquet_device_buffer(std::unique_ptr<cudf::table> const& table,
  * @param scale_factor The scale factor of NDS-H tables to generate
  * @param table_names The names of the tables to generate
  * @param sources The parquet data sources to populate
+ * @param include_lineitem_comment Whether to generate the `l_comment` column
+ * @param use_managed_memory Whether to use a managed pool for data generation
  */
 void generate_parquet_data_sources(double scale_factor,
                                    std::vector<std::string> const& table_names,
-                                   std::unordered_map<std::string, cuio_source_sink_pair>& sources);
+                                   ndsh_data_sources& sources,
+                                   bool include_lineitem_comment = false,
+                                   bool use_managed_memory       = true);
