@@ -33,6 +33,11 @@ pushd basic || exit
 run_example ./basic_example
 popd || exit
 
+pushd fixed_width_transformers || exit
+run_example ./oracle_number_inspired_lto add
+run_example ./oracle_number_inspired_lto multiply
+popd || exit
+
 pushd hybrid_scan_io || exit
 run_example ./hybrid_scan_io example.parquet string_col 0000001 PINNED_BUFFER
 run_example ./hybrid_scan_pipeline example.parquet 2 HOST_BUFFER ROW_GROUPS 2
