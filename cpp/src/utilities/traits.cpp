@@ -318,6 +318,19 @@ struct is_dictionary_impl {
  */
 bool is_dictionary(data_type type) { return cudf::type_dispatcher(type, is_dictionary_impl{}); }
 
+struct is_run_end_encoded_impl {
+  template <typename T>
+  constexpr bool operator()()
+  {
+    return is_run_end_encoded<T>();
+  }
+};
+
+bool is_run_end_encoded(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED;
+}
+
 /**
  * @brief Indicates whether `type` is a valid dictionary key type
  *
@@ -369,7 +382,11 @@ struct is_compound_impl {
  * @return true `type` is a compound type
  * @return false `type` is a simple type
  */
-bool is_compound(data_type type) { return cudf::type_dispatcher(type, is_compound_impl{}); }
+bool is_compound(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED or
+         cudf::type_dispatcher(type, is_compound_impl{});
+}
 
 struct is_nested_impl {
   template <typename T>
@@ -390,7 +407,12 @@ struct is_nested_impl {
  * @return true `type` is a nested type
  * @return false `type` is not a nested type
  */
-bool is_nested(data_type type) { return cudf::type_dispatcher(type, is_nested_impl{}); }
+bool is_nested(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_nested_impl{});
+}
 
 namespace {
 template <typename FromType>

@@ -22,4 +22,10 @@ static constexpr size_type dictionary_indices_column_index =
 static constexpr size_type dictionary_keys_column_index =
   1;  ///< Child index of the dictionary key column
 
+static constexpr size_type run_end_encoded_run_ends_column_index =
+  0;  ///< Child index of the run ends column
+
+static constexpr size_type run_end_encoded_values_column_index =
+  1;  ///< Child index of the run values column
+
 }  // namespace CUDF_EXPORT cudf

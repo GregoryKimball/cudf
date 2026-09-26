@@ -9,6 +9,7 @@
 #include <cudf/types.hpp>
 #include <cudf/wrappers/dictionary.hpp>
 #include <cudf/wrappers/durations.hpp>
+#include <cudf/wrappers/run_end_encoded.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <cuda/std/type_traits>
@@ -550,6 +551,20 @@ CUDF_HOST_DEVICE constexpr inline bool is_dictionary()
 bool is_dictionary(data_type type);
 
 /**
+ * @brief Indicates whether the type `T` is a run-end encoded type.
+ */
+template <typename T>
+CUDF_HOST_DEVICE constexpr inline bool is_run_end_encoded()
+{
+  return cuda::std::is_same_v<run_end_encoded32, T>;
+}
+
+/**
+ * @brief Indicates whether `type` is a run-end encoded `data_type`.
+ */
+bool is_run_end_encoded(data_type type);
+
+/**
  * @brief Indicates whether the type `T` is a valid dictionary key type
  *
  * @tparam T  The type to verify
@@ -617,8 +632,9 @@ template <typename T>
 CUDF_HOST_DEVICE constexpr inline bool is_compound()
 {
   return cuda::std::is_same_v<T, cudf::string_view> or
-         cuda::std::is_same_v<T, cudf::dictionary32> or cuda::std::is_same_v<T, cudf::list_view> or
-         cuda::std::is_same_v<T, cudf::struct_view>;
+         cuda::std::is_same_v<T, cudf::dictionary32> or
+         cuda::std::is_same_v<T, cudf::run_end_encoded32> or
+         cuda::std::is_same_v<T, cudf::list_view> or cuda::std::is_same_v<T, cudf::struct_view>;
 }
 
 /**

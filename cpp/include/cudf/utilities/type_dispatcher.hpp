@@ -10,6 +10,7 @@
 #include <cudf/utilities/error.hpp>
 #include <cudf/wrappers/dictionary.hpp>
 #include <cudf/wrappers/durations.hpp>
+#include <cudf/wrappers/run_end_encoded.hpp>
 #include <cudf/wrappers/timestamps.hpp>
 
 #include <string>
@@ -170,6 +171,7 @@ CUDF_TYPE_MAPPING(cudf::duration_ms, type_id::DURATION_MILLISECONDS)
 CUDF_TYPE_MAPPING(cudf::duration_us, type_id::DURATION_MICROSECONDS)
 CUDF_TYPE_MAPPING(cudf::duration_ns, type_id::DURATION_NANOSECONDS)
 CUDF_TYPE_MAPPING(cudf::dictionary32, type_id::DICTIONARY32)
+CUDF_TYPE_MAPPING(cudf::run_end_encoded32, type_id::RUN_END_ENCODED)
 CUDF_TYPE_MAPPING(cudf::string_view, type_id::STRING)
 CUDF_TYPE_MAPPING(cudf::list_view, type_id::LIST)
 CUDF_TYPE_MAPPING(numeric::decimal32, type_id::DECIMAL32)
@@ -286,6 +288,12 @@ struct type_to_scalar_type_impl<numeric::decimal128> {
 
 template <>  // TODO: this is a temporary solution for make_pair_iterator
 struct type_to_scalar_type_impl<cudf::dictionary32> {
+  using ScalarType       = cudf::numeric_scalar<int32_t>;
+  using ScalarDeviceType = cudf::numeric_scalar_device_view<int32_t>;
+};
+
+template <>
+struct type_to_scalar_type_impl<cudf::run_end_encoded32> {
   using ScalarType       = cudf::numeric_scalar<int32_t>;
   using ScalarDeviceType = cudf::numeric_scalar_device_view<int32_t>;
 };
@@ -532,6 +540,16 @@ CUDF_HOST_DEVICE __forceinline__ constexpr decltype(auto) type_dispatcher(cudf::
     case type_id::DICTIONARY32:
       return f.template operator()<typename IdTypeMap<type_id::DICTIONARY32>::type>(
         std::forward<Ts>(args)...);
+    case type_id::RUN_END_ENCODED: {
+      // REE has no per-logical-row storage representation that a generic functor can consume.
+      // REE-aware entry points must resolve logical rows through the values child before
+      // dispatching its value type.
+#ifndef __CUDA_ARCH__
+      CUDF_FAIL("RUN_END_ENCODED requires type-specific dispatch.");
+#else
+      CUDF_UNREACHABLE("RUN_END_ENCODED requires type-specific dispatch.");
+#endif
+    }
     case type_id::STRING:
       return f.template operator()<typename IdTypeMap<type_id::STRING>::type>(
         std::forward<Ts>(args)...);
