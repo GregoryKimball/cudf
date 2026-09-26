@@ -8,6 +8,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/utilities/default_stream.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 
@@ -55,6 +56,42 @@ std::unique_ptr<column> decode(run_end_encoded_column_view const& input,
 std::unique_ptr<column> decode(column_view const& input,
                                cuda::stream_ref stream   = cudf::get_default_stream(),
                                cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Computes a whole-column sum directly from non-null numeric runs.
+ *
+ * Each physical value is multiplied by its logical run length and the weighted values are reduced
+ * in `O(number_of_runs)` work. Sliced inputs are supported; boundary runs are clipped to the
+ * logical slice. No decoded logical-row column is materialized.
+ *
+ * The input must be non-empty, non-nullable, and have numeric (non-`BOOL8`) values. The output must
+ * be a numeric type at least as wide as the input and must preserve integral versus floating-point
+ * representation. For example, `INT32` may produce `INT32` or `INT64`, while `INT64` may only
+ * produce `INT64`.
+ *
+ * @param input Run-end encoded input
+ * @param output_type Numeric scalar output type
+ * @param stream CUDA stream used for device work
+ * @param mr Memory resources used for temporary and output allocations
+ * @return Valid scalar containing the weighted sum
+ *
+ * @throws cudf::logic_error if the input is empty or nullable
+ * @throws cudf::data_type_error if the input values or output type are unsupported
+ */
+std::unique_ptr<scalar> sum(
+  run_end_encoded_column_view const& input,
+  data_type output_type,
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Computes a whole-column run-native sum from a RUN_END_ENCODED column.
+ */
+std::unique_ptr<scalar> sum(
+  column_view const& input,
+  data_type output_type,
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
 
 }  // namespace run_end_encoded
 }  // namespace CUDF_EXPORT cudf

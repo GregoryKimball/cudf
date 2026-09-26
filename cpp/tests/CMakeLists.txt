@@ -698,6 +698,7 @@ ConfigureTest(
   run_end_encoded/factories_test.cpp
   run_end_encoded/row_operator_test.cu
   run_end_encoded/structural_test.cu
+  run_end_encoded/sum_test.cu
 )
 
 # ##################################################################################################
