@@ -689,7 +689,11 @@ ConfigureTest(
 
 # ##################################################################################################
 # * run-end encoded tests --------------------------------------------------------------------------
-ConfigureTest(RUN_END_ENCODED_TEST run_end_encoded/factories_test.cpp)
+ConfigureTest(
+  RUN_END_ENCODED_TEST
+  run_end_encoded/encode_decode_test.cu
+  run_end_encoded/factories_test.cpp
+)
 
 # ##################################################################################################
 # * encode tests -----------------------------------------------------------------------------------

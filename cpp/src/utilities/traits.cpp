@@ -378,14 +378,6 @@ bool is_dictionary(data_type type)
            : cudf::type_dispatcher(type, is_dictionary_impl{});
 }
 
-struct is_run_end_encoded_impl {
-  template <typename T>
-  constexpr bool operator()()
-  {
-    return is_run_end_encoded<T>();
-  }
-};
-
 bool is_run_end_encoded(data_type type)
 {
   return type.id() == type_id::RUN_END_ENCODED;
