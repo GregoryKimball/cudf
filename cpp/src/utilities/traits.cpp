@@ -39,7 +39,8 @@ struct unary_relationally_comparable_functor {
  */
 bool is_relationally_comparable(data_type type)
 {
-  return type_dispatcher(type, unary_relationally_comparable_functor{});
+  return type.id() == type_id::RUN_END_ENCODED or
+         type_dispatcher(type, unary_relationally_comparable_functor{});
 }
 
 namespace {
@@ -71,7 +72,8 @@ struct unary_equality_comparable_functor {
  */
 bool is_equality_comparable(data_type type)
 {
-  return cudf::type_dispatcher(type, unary_equality_comparable_functor{});
+  return type.id() == type_id::RUN_END_ENCODED or
+         cudf::type_dispatcher(type, unary_equality_comparable_functor{});
 }
 
 struct is_numeric_impl {
@@ -93,7 +95,12 @@ struct is_numeric_impl {
  * @return true `type` is numeric
  * @return false `type` is not numeric
  */
-bool is_numeric(data_type type) { return cudf::type_dispatcher(type, is_numeric_impl{}); }
+bool is_numeric(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_numeric_impl{});
+}
 
 struct is_index_type_impl {
   template <typename T>
@@ -114,7 +121,12 @@ struct is_index_type_impl {
  * @return true `type` is index type
  * @return false `type` is not index type
  */
-bool is_index_type(data_type type) { return cudf::type_dispatcher(type, is_index_type_impl{}); }
+bool is_index_type(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_index_type_impl{});
+}
 
 struct is_signed_impl {
   template <typename T>
@@ -130,7 +142,11 @@ struct is_signed_impl {
  * @param type The `data_type` to verify
  * @return true `type` is signed numeric
  */
-bool is_signed(data_type type) { return cudf::type_dispatcher(type, is_signed_impl{}); }
+bool is_signed(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED ? false
+                                               : cudf::type_dispatcher(type, is_signed_impl{});
+}
 
 struct is_unsigned_impl {
   template <typename T>
@@ -149,7 +165,12 @@ struct is_unsigned_impl {
  * @return true `type` is unsigned numeric
  * @return false `type` is signed numeric
  */
-bool is_unsigned(data_type type) { return cudf::type_dispatcher(type, is_unsigned_impl{}); }
+bool is_unsigned(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_unsigned_impl{});
+}
 
 struct is_integral_impl {
   template <typename T>
@@ -159,7 +180,12 @@ struct is_integral_impl {
   }
 };
 
-bool is_integral(data_type type) { return cudf::type_dispatcher(type, is_integral_impl{}); }
+bool is_integral(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_integral_impl{});
+}
 
 struct is_integral_not_bool_impl {
   template <typename T>
@@ -171,7 +197,9 @@ struct is_integral_not_bool_impl {
 
 bool is_integral_not_bool(data_type type)
 {
-  return cudf::type_dispatcher(type, is_integral_not_bool_impl{});
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_integral_not_bool_impl{});
 }
 
 struct is_numeric_not_bool_impl {
@@ -184,7 +212,9 @@ struct is_numeric_not_bool_impl {
 
 bool is_numeric_not_bool(data_type type)
 {
-  return cudf::type_dispatcher(type, is_numeric_not_bool_impl{});
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_numeric_not_bool_impl{});
 }
 
 struct is_floating_point_impl {
@@ -206,7 +236,9 @@ struct is_floating_point_impl {
  */
 bool is_floating_point(data_type type)
 {
-  return cudf::type_dispatcher(type, is_floating_point_impl{});
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_floating_point_impl{});
 }
 
 struct is_boolean_impl {
@@ -224,7 +256,11 @@ struct is_boolean_impl {
  * @return true `type` is a Boolean
  * @return false `type` is not a Boolean
  */
-bool is_boolean(data_type type) { return cudf::type_dispatcher(type, is_boolean_impl{}); }
+bool is_boolean(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED ? false
+                                               : cudf::type_dispatcher(type, is_boolean_impl{});
+}
 
 struct is_fixed_point_impl {
   template <typename T>
@@ -241,7 +277,12 @@ struct is_fixed_point_impl {
  * @return true `type` is a fixed point type
  * @return false `type` is not a fixed point type
  */
-bool is_fixed_point(data_type type) { return cudf::type_dispatcher(type, is_fixed_point_impl{}); }
+bool is_fixed_point(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_fixed_point_impl{});
+}
 
 struct is_timestamp_impl {
   template <typename T>
@@ -260,7 +301,12 @@ struct is_timestamp_impl {
  * @return true `type` is a timestamp
  * @return false `type` is not a timestamp
  */
-bool is_timestamp(data_type type) { return cudf::type_dispatcher(type, is_timestamp_impl{}); }
+bool is_timestamp(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_timestamp_impl{});
+}
 
 struct is_duration_impl {
   template <typename T>
@@ -279,7 +325,12 @@ struct is_duration_impl {
  * @return true `type` is a duration
  * @return false `type` is not a duration
  */
-bool is_duration(data_type type) { return cudf::type_dispatcher(type, is_duration_impl{}); }
+bool is_duration(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_duration_impl{});
+}
 
 struct is_chrono_impl {
   template <typename T>
@@ -299,7 +350,11 @@ struct is_chrono_impl {
  * @return true `type` is a chrono type
  * @return false `type` is not a chrono type
  */
-bool is_chrono(data_type type) { return cudf::type_dispatcher(type, is_chrono_impl{}); }
+bool is_chrono(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED ? false
+                                               : cudf::type_dispatcher(type, is_chrono_impl{});
+}
 
 struct is_dictionary_impl {
   template <typename T>
@@ -316,7 +371,12 @@ struct is_dictionary_impl {
  * @return true `type` is a dictionary type
  * @return false `type` is not a dictionary type
  */
-bool is_dictionary(data_type type) { return cudf::type_dispatcher(type, is_dictionary_impl{}); }
+bool is_dictionary(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_dictionary_impl{});
+}
 
 struct is_run_end_encoded_impl {
   template <typename T>
@@ -360,7 +420,12 @@ struct is_fixed_width_impl {
  * @return true `type` is fixed-width
  * @return false  `type` is variable-width
  */
-bool is_fixed_width(data_type type) { return cudf::type_dispatcher(type, is_fixed_width_impl{}); }
+bool is_fixed_width(data_type type)
+{
+  return type.id() == type_id::RUN_END_ENCODED
+           ? false
+           : cudf::type_dispatcher(type, is_fixed_width_impl{});
+}
 
 struct is_compound_impl {
   template <typename T>

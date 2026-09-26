@@ -25,6 +25,11 @@ TEST_F(RunEndEncodedFactoriesTest, TypeDispatchAndTraits)
   EXPECT_TRUE(cudf::is_run_end_encoded(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
   EXPECT_TRUE(cudf::is_compound(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
   EXPECT_FALSE(cudf::is_nested(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
+  EXPECT_TRUE(cudf::is_equality_comparable(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
+  EXPECT_TRUE(cudf::is_relationally_comparable(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
+  EXPECT_FALSE(cudf::is_fixed_width(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
+  EXPECT_FALSE(cudf::is_numeric(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
+  EXPECT_FALSE(cudf::is_dictionary(cudf::data_type{cudf::type_id::RUN_END_ENCODED}));
 }
 
 TEST_F(RunEndEncodedFactoriesTest, CreateFromColumnViews)
