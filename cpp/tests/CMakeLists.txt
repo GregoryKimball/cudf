@@ -693,6 +693,7 @@ ConfigureTest(
   RUN_END_ENCODED_TEST
   run_end_encoded/encode_decode_test.cu
   run_end_encoded/factories_test.cpp
+  run_end_encoded/structural_test.cu
 )
 
 # ##################################################################################################

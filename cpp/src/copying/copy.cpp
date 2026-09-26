@@ -9,6 +9,8 @@
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/null_mask.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_factories.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/utilities/traits.hpp>
 
@@ -128,6 +130,10 @@ std::unique_ptr<column> allocate_like(column_view const& input,
 std::unique_ptr<column> empty_like(column_view const& input)
 {
   CUDF_FUNC_RANGE();
+
+  if (input.type().id() == type_id::RUN_END_ENCODED) {
+    return make_empty_run_end_encoded_column(run_end_encoded_column_view{input}.values_type());
+  }
 
   // test_dataframe.py passes an EMPTY column type here;
   // this causes is_nested to throw an error since it uses the type-dispatcher
