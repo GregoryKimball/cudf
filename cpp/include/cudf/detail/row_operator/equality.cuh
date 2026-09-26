@@ -13,6 +13,7 @@
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/run_end_encoded/run_end_encoded_column_device_view.cuh>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/default_stream.hpp>
@@ -129,6 +130,10 @@ class device_row_comparator {
                                        size_type const rhs_index) const noexcept
   {
     auto equal_elements = [lhs_index, rhs_index, this](column_device_view l, column_device_view r) {
+      if (l.type().id() == type_id::RUN_END_ENCODED) {
+        return element_comparator{check_nulls, l, r, nulls_are_equal, comparator}
+          .compare_run_end_encoded(lhs_index, rhs_index);
+      }
       return cudf::type_dispatcher(
         l.type(),
         element_comparator{check_nulls, l, r, nulls_are_equal, comparator},
@@ -230,6 +235,39 @@ class device_row_comparator {
         nulls_are_equal{nulls_are_equal},
         comparator{comparator}
     {
+    }
+
+    /**
+     * @brief Compares logical elements in two run-end encoded columns.
+     *
+     * Parent validity is checked before either values child is accessed. Each logical row is
+     * independently resolved to its physical run, allowing equivalent columns to use different
+     * run layouts.
+     */
+    __device__ bool compare_run_end_encoded(size_type const lhs_element_index,
+                                            size_type const rhs_element_index) const noexcept
+    {
+      if (check_nulls) {
+        bool const lhs_is_null{lhs.is_null(lhs_element_index)};
+        bool const rhs_is_null{rhs.is_null(rhs_element_index)};
+        if (lhs_is_null and rhs_is_null) {
+          return nulls_are_equal == null_equality::EQUAL;
+        } else if (lhs_is_null != rhs_is_null) {
+          return false;
+        }
+      }
+
+      auto const lhs_ree = run_end_encoded_column_device_view{lhs};
+      auto const rhs_ree = run_end_encoded_column_device_view{rhs};
+      auto const lhs_run = lhs_ree.find_run(lhs_element_index);
+      auto const rhs_run = rhs_ree.find_run(rhs_element_index);
+      auto const lvalues = lhs.child(run_end_encoded_values_column_index);
+      auto const rvalues = rhs.child(run_end_encoded_values_column_index);
+      return cudf::type_dispatcher<dispatch_void_if_nested>(
+        lvalues.type(),
+        element_comparator{check_nulls, lvalues, rvalues, nulls_are_equal, comparator},
+        lhs_run,
+        rhs_run);
     }
 
     /**

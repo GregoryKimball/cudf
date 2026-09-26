@@ -19,8 +19,7 @@ struct RunEndEncodedStructuralTest : public cudf::test::BaseFixture {};
 
 TEST_F(RunEndEncodedStructuralTest, ZeroCopySliceAndCanonicalDeepCopy)
 {
-  cudf::test::fixed_width_column_wrapper<int32_t> input{10, 10, 10, 20, 20,
-                                                        20, 30, 30, 30, 30};
+  cudf::test::fixed_width_column_wrapper<int32_t> input{10, 10, 10, 20, 20, 20, 30, 30, 30, 30};
   auto encoded = cudf::run_end_encoded::encode(input);
   auto sliced  = cudf::slice(encoded->view(), {2, 8}).front();
   cudf::run_end_encoded_column_view source{encoded->view()};
@@ -65,8 +64,8 @@ TEST_F(RunEndEncodedStructuralTest, DeepCopyRebasesNullableSlice)
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(result.run_ends(), expected_ends);
 
   auto decoded = cudf::run_end_encoded::decode(result);
-  cudf::test::fixed_width_column_wrapper<int32_t> expected(
-    {1, 8, 8, 2, 2}, {true, false, false, true, true});
+  cudf::test::fixed_width_column_wrapper<int32_t> expected({1, 8, 8, 2, 2},
+                                                           {true, false, false, true, true});
   CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*decoded, expected);
 
   auto unsliced_copy = std::make_unique<cudf::column>(encoded->view());
@@ -77,8 +76,8 @@ TEST_F(RunEndEncodedStructuralTest, DeepCopyRebasesNullableSlice)
 
 TEST_F(RunEndEncodedStructuralTest, GetElementUsesLogicalRowsAndValidity)
 {
-  cudf::test::fixed_width_column_wrapper<int32_t> input(
-    {5, 5, 7, 7, 9}, {true, true, false, false, true});
+  cudf::test::fixed_width_column_wrapper<int32_t> input({5, 5, 7, 7, 9},
+                                                        {true, true, false, false, true});
   auto encoded = cudf::run_end_encoded::encode(input);
 
   auto value = cudf::get_element(encoded->view(), 1);
@@ -103,52 +102,62 @@ TEST_F(RunEndEncodedStructuralTest, DirectGatherCanonicalizesAndPreservesConstan
   cudf::test::fixed_width_column_wrapper<int32_t> constant{8, 8, 8};
   auto encoded_constant = cudf::run_end_encoded::encode(constant);
   cudf::test::fixed_width_column_wrapper<int32_t> constant_map{2, 0, 1, 1, 0};
-  auto gathered_constant =
-    cudf::gather(cudf::table_view{{encoded_constant->view()}}, constant_map);
+  auto gathered_constant = cudf::gather(cudf::table_view{{encoded_constant->view()}}, constant_map);
   EXPECT_EQ(cudf::run_end_encoded_column_view{gathered_constant->view().column(0)}.num_runs(), 1);
 }
 
 TEST_F(RunEndEncodedStructuralTest, GatherNullableAndSliced)
 {
-  cudf::test::fixed_width_column_wrapper<int32_t> input(
-    {1, 1, 7, 7, 2, 2}, {true, true, false, false, true, true});
+  cudf::test::fixed_width_column_wrapper<int32_t> input({1, 1, 7, 7, 2, 2},
+                                                        {true, true, false, false, true, true});
   auto encoded = cudf::run_end_encoded::encode(input);
   auto sliced  = cudf::slice(encoded->view(), {1, 6}).front();
   cudf::test::fixed_width_column_wrapper<int32_t> map{0, 1, 2, 4, 3};
   auto gathered = cudf::gather(cudf::table_view{{sliced}}, map);
   auto decoded  = cudf::run_end_encoded::decode(gathered->view().column(0));
-  cudf::test::fixed_width_column_wrapper<int32_t> expected(
-    {1, 7, 7, 2, 2}, {true, false, false, true, true});
+  cudf::test::fixed_width_column_wrapper<int32_t> expected({1, 7, 7, 2, 2},
+                                                           {true, false, false, true, true});
   CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*decoded, expected);
   EXPECT_EQ(cudf::run_end_encoded_column_view{gathered->view().column(0)}.num_runs(), 3);
 }
 
 TEST_F(RunEndEncodedStructuralTest, ConcatenateCoalescesEqualBoundaries)
 {
-  cudf::test::fixed_width_column_wrapper<int32_t> lhs{1, 1, 2, 2};
+  cudf::test::fixed_width_column_wrapper<int32_t> lhs_source{0, 1, 1, 2, 2, 9};
   cudf::test::fixed_width_column_wrapper<int32_t> equal_rhs{2, 2, 3};
   cudf::test::fixed_width_column_wrapper<int32_t> unequal_rhs{4, 4};
-  auto lhs_ree       = cudf::run_end_encoded::encode(lhs);
-  auto equal_ree     = cudf::run_end_encoded::encode(equal_rhs);
-  auto unequal_ree   = cudf::run_end_encoded::encode(unequal_rhs);
-  auto equal_result  = cudf::concatenate(
-    std::vector<cudf::column_view>{lhs_ree->view(), equal_ree->view()});
-  auto unequal_result = cudf::concatenate(
-    std::vector<cudf::column_view>{lhs_ree->view(), unequal_ree->view()});
+  auto lhs_ree        = cudf::run_end_encoded::encode(lhs_source);
+  auto lhs            = cudf::slice(lhs_ree->view(), {1, 5}).front();
+  auto equal_ree      = cudf::run_end_encoded::encode(equal_rhs);
+  auto unequal_ree    = cudf::run_end_encoded::encode(unequal_rhs);
+  auto equal_result   = cudf::concatenate(std::vector<cudf::column_view>{lhs, equal_ree->view()});
+  auto unequal_result = cudf::concatenate(std::vector<cudf::column_view>{lhs, unequal_ree->view()});
 
   EXPECT_EQ(cudf::run_end_encoded_column_view{equal_result->view()}.num_runs(), 3);
   EXPECT_EQ(cudf::run_end_encoded_column_view{unequal_result->view()}.num_runs(), 3);
   cudf::test::fixed_width_column_wrapper<int32_t> expected{1, 1, 2, 2, 2, 2, 3};
   auto decoded = cudf::run_end_encoded::decode(equal_result->view());
   CUDF_TEST_EXPECT_COLUMNS_EQUAL(*decoded, expected);
+
+  cudf::test::fixed_width_column_wrapper<int32_t> nullable_lhs({1, 8}, {true, false});
+  cudf::test::fixed_width_column_wrapper<int32_t> nullable_rhs({7, 2}, {false, true});
+  auto nullable_lhs_ree = cudf::run_end_encoded::encode(nullable_lhs);
+  auto nullable_rhs_ree = cudf::run_end_encoded::encode(nullable_rhs);
+  auto nullable_result  = cudf::concatenate(
+    std::vector<cudf::column_view>{nullable_lhs_ree->view(), nullable_rhs_ree->view()});
+  EXPECT_EQ(cudf::run_end_encoded_column_view{nullable_result->view()}.num_runs(), 3);
+  auto nullable_decoded = cudf::run_end_encoded::decode(nullable_result->view());
+  cudf::test::fixed_width_column_wrapper<int32_t> nullable_expected({1, 8, 7, 2},
+                                                                    {true, false, false, true});
+  CUDF_TEST_EXPECT_COLUMNS_EQUIVALENT(*nullable_decoded, nullable_expected);
 }
 
 TEST_F(RunEndEncodedStructuralTest, TypeCompatibilityUsesValuesChild)
 {
   cudf::test::fixed_width_column_wrapper<int32_t> ints{1, 1};
   cudf::test::fixed_width_column_wrapper<int64_t> longs{1, 1};
-  auto lhs  = cudf::run_end_encoded::encode(ints);
-  auto rhs  = cudf::run_end_encoded::encode(ints);
+  auto lhs   = cudf::run_end_encoded::encode(ints);
+  auto rhs   = cudf::run_end_encoded::encode(ints);
   auto other = cudf::run_end_encoded::encode(longs);
   EXPECT_TRUE(cudf::have_same_types(lhs->view(), rhs->view()));
   EXPECT_FALSE(cudf::have_same_types(lhs->view(), other->view()));

@@ -182,6 +182,9 @@ ConfigureTest(
   PERCENT 100
 )
 
+# Focused run-end encoded hash-join correctness tests
+ConfigureTest(RUN_END_ENCODED_JOIN_TEST join/run_end_encoded_join_tests.cpp)
+
 # ##################################################################################################
 # * is_sorted tests -------------------------------------------------------------------------------
 ConfigureTest(IS_SORTED_TEST sort/is_sorted_tests.cpp)
@@ -693,6 +696,7 @@ ConfigureTest(
   RUN_END_ENCODED_TEST
   run_end_encoded/encode_decode_test.cu
   run_end_encoded/factories_test.cpp
+  run_end_encoded/row_operator_test.cu
   run_end_encoded/structural_test.cu
 )
 
