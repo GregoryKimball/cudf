@@ -207,6 +207,10 @@ ConfigureNVBench(TDIGEST_NVBENCH quantiles/tdigest.cpp)
 ConfigureNVBench(TYPE_DISPATCHER_NVBENCH type_dispatcher/type_dispatcher.cu)
 
 # ##################################################################################################
+# * packed decimal benchmark ----------------------------------------------------------------------
+ConfigureNVBench(PACKED_DECIMAL_NVBENCH packed_decimal/packed_decimal128.cu)
+
+# ##################################################################################################
 # * reduction benchmark ---------------------------------------------------------------------------
 ConfigureNVBench(
   REDUCTION_NVBENCH
