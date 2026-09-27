@@ -16,6 +16,7 @@
 #include <cudf/hashing/detail/hashing.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/packed_decimal/packed_decimal128.cuh>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/default_stream.hpp>
@@ -68,7 +69,8 @@ class element_hasher {
   template <typename T>
   __device__ result_type operator()(column_device_view const& col,
                                     size_type row_index) const noexcept
-    requires(column_device_view::has_element_accessor<T>())
+    requires(column_device_view::has_element_accessor<T>() and
+             not cuda::std::is_same_v<T, packed_decimal128>)
   {
     if (_check_nulls && col.is_null(row_index)) { return _null_hash; }
     return hash_function<T>{_seed}(col.element<T>(row_index));
@@ -85,7 +87,19 @@ class element_hasher {
   template <typename T>
   __device__ result_type operator()(column_device_view const& col,
                                     size_type row_index) const noexcept
-    requires(not column_device_view::has_element_accessor<T>())
+    requires(cuda::std::is_same_v<T, packed_decimal128>)
+  {
+    if (_check_nulls && col.is_null(row_index)) { return _null_hash; }
+    auto const values = packed_decimal128_device_view{
+      col.child(0).head<uint8_t>(), col.child(1).head<uint64_t>(), col.offset()};
+    return hash_function<__int128_t>{_seed}(values[row_index]);
+  }
+
+  template <typename T>
+  __device__ result_type operator()(column_device_view const& col,
+                                    size_type row_index) const noexcept
+    requires(not column_device_view::has_element_accessor<T>() and
+             not cuda::std::is_same_v<T, packed_decimal128>)
   {
     CUDF_UNREACHABLE("Unsupported type in hash.");
   }
@@ -118,6 +132,10 @@ class device_row_hasher {
   __device__ result_type operator()(size_type row_index) const noexcept
   {
     auto const hasher = [row_index, this](auto const& column) {
+      if (column.type().id() == type_id::PACKED_DECIMAL128) {
+        return element_hasher_adapter{_check_nulls, _seed}
+          .template operator()<packed_decimal128>(column, row_index);
+      }
       return cudf::type_dispatcher<dispatch_storage_type>(
         column.type(), element_hasher_adapter{_check_nulls, _seed}, column, row_index);
     };
