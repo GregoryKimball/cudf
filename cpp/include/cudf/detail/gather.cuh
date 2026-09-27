@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/detail/indexalator.cuh>
 #include <cudf/detail/null_mask.hpp>
@@ -16,6 +17,8 @@
 #include <cudf/dictionary/dictionary_factories.hpp>
 #include <cudf/lists/detail/gather.cuh>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/packed_decimal/packed_decimal128.cuh>
+#include <cudf/packed_decimal/packed_decimal128.hpp>
 #include <cudf/strings/detail/gather.cuh>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table.hpp>
@@ -27,12 +30,18 @@
 #include <cudf/utilities/traits.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
+#include <rmm/device_buffer.hpp>
 #include <rmm/exec_policy.hpp>
 
 #include <cuda/iterator>
+#include <cuda/std/functional>
 #include <cuda/stream>
+#include <thrust/for_each.h>
 #include <thrust/gather.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <thrust/logical.h>
+#include <thrust/transform.h>
+#include <thrust/transform_scan.h>
 
 #include <algorithm>
 
@@ -178,6 +187,185 @@ struct column_gatherer {
       source_column, gather_map_begin, gather_map_end, nullify_out_of_bounds, stream, mr);
   }
 };
+
+template <typename MapIterator>
+__global__ void compute_gather_packed_decimal_widths(
+  uint64_t const* source_descriptors,
+  MapIterator gather_map,
+  size_type output_size,
+  size_type source_size,
+  bitmask_type const* validity,
+  size_type source_offset,
+  bool nullify_out_of_bounds,
+  uint64_t* widths)
+{
+  __shared__ uint8_t row_widths[packed_decimal128_column_view::block_size];
+  auto const lane       = static_cast<size_type>(threadIdx.x);
+  auto const output_row = static_cast<size_type>(blockIdx.x) *
+                            packed_decimal128_column_view::block_size +
+                          lane;
+  uint8_t width = 0;
+  if (output_row < output_size) {
+    auto const index = gather_map[output_row];
+    auto const out_of_bounds =
+      static_cast<uint64_t>(index) >= static_cast<uint64_t>(source_size);
+    if (!(nullify_out_of_bounds && out_of_bounds)) {
+      auto const row = static_cast<size_type>(index);
+      if (validity == nullptr || bit_is_set(validity, source_offset + row)) {
+        width = static_cast<uint8_t>(
+          source_descriptors[(source_offset + row) / packed_decimal128_column_view::block_size] &
+          0x1f);
+      }
+    }
+  }
+  row_widths[lane] = width;
+  __syncthreads();
+
+  for (auto stride = packed_decimal128_column_view::block_size / 2; stride > 0; stride /= 2) {
+    if (lane < stride) { row_widths[lane] = max(row_widths[lane], row_widths[lane + stride]); }
+    __syncthreads();
+  }
+  if (lane == 0) { widths[blockIdx.x] = row_widths[0]; }
+}
+
+template <typename MapIterator>
+std::unique_ptr<column> gather_packed_decimal128(column_view const& source_column,
+                                                 MapIterator gather_map_begin,
+                                                 MapIterator gather_map_end,
+                                                 bool nullify_out_of_bounds,
+                                                 cuda::stream_ref stream,
+                                                 cudf::memory_resources mr)
+{
+  auto const output_size = static_cast<size_type>(cudf::distance(gather_map_begin, gather_map_end));
+  auto const packed      = packed_decimal128_column_view{source_column};
+  auto const accessor = packed_decimal128_device_view{
+    packed.payload_begin(), packed.descriptors().data<uint64_t>(), source_column.offset()};
+  auto const source_size   = source_column.size();
+  auto const validity      = source_column.null_mask();
+  auto const source_offset = source_column.offset();
+  auto const block_size    = packed_decimal128_column_view::block_size;
+  auto const block_count   = (output_size + block_size - 1) / block_size;
+  auto widths              = make_numeric_column(data_type{type_id::UINT64},
+                                    block_count,
+                                    mask_state::UNALLOCATED,
+                                    stream,
+                                    mr.get_temporary_mr());
+  auto descriptors         = make_numeric_column(data_type{type_id::UINT64},
+                                         block_count,
+                                         mask_state::UNALLOCATED,
+                                         stream,
+                                         mr.get_output_mr());
+  auto const widths_data   = widths->mutable_view().data<uint64_t>();
+  auto const offsets_data  = descriptors->mutable_view().data<uint64_t>();
+  auto const blocks_begin  = thrust::make_counting_iterator<size_type>(0);
+
+  if (block_count != 0) {
+    compute_gather_packed_decimal_widths<<<block_count, block_size, 0, stream.get()>>>(
+      packed.descriptors().data<uint64_t>(),
+      gather_map_begin,
+      output_size,
+      source_size,
+      validity,
+      source_offset,
+      nullify_out_of_bounds,
+      widths_data);
+    CUDF_CUDA_TRY(cudaPeekAtLastError());
+  }
+
+  thrust::transform_exclusive_scan(
+    rmm::exec_policy_nosync(stream, mr.get_temporary_mr()),
+    blocks_begin,
+    blocks_begin + block_count,
+    offsets_data,
+    [widths_data, output_size] __device__(size_type block) {
+      auto const begin = block * packed_decimal128_column_view::block_size;
+      auto const rows =
+        min(output_size - begin, packed_decimal128_column_view::block_size);
+      return widths_data[block] * static_cast<uint64_t>(rows);
+    },
+    uint64_t{0},
+    cuda::std::plus<uint64_t>{});
+
+  uint64_t payload_size = 0;
+  if (block_count != 0) {
+    uint64_t last_offset{};
+    uint64_t last_width{};
+    CUDF_CUDA_TRY(cudaMemcpyAsync(&last_offset,
+                                  offsets_data + block_count - 1,
+                                  sizeof(last_offset),
+                                  cudaMemcpyDeviceToHost,
+                                  stream.get()));
+    CUDF_CUDA_TRY(cudaMemcpyAsync(&last_width,
+                                  widths_data + block_count - 1,
+                                  sizeof(last_width),
+                                  cudaMemcpyDeviceToHost,
+                                  stream.get()));
+    CUDF_CUDA_TRY(cudaStreamSynchronize(stream.get()));
+    auto const last_rows = output_size - (block_count - 1) * block_size;
+    payload_size = last_offset + last_width * static_cast<uint64_t>(last_rows);
+
+    thrust::transform(
+      rmm::exec_policy_nosync(stream, mr.get_temporary_mr()),
+      blocks_begin,
+      blocks_begin + block_count,
+      offsets_data,
+      [widths_data, offsets_data] __device__(size_type block) {
+        return (offsets_data[block] << 5) | widths_data[block];
+      });
+  }
+
+  rmm::device_buffer payload{static_cast<std::size_t>(payload_size), stream, mr.get_output_mr()};
+  auto const output_payload = static_cast<uint8_t*>(payload.data());
+  auto const output_begin   = thrust::make_counting_iterator<size_type>(0);
+  thrust::for_each_n(
+    rmm::exec_policy_nosync(stream, mr.get_temporary_mr()),
+    output_begin,
+    output_size,
+    [accessor,
+     gather_map_begin,
+     source_size,
+     validity,
+     source_offset,
+     nullify_out_of_bounds,
+     offsets_data,
+     output_payload] __device__(size_type output_row) {
+      auto const index = gather_map_begin[output_row];
+      auto const out_of_bounds =
+        static_cast<uint64_t>(index) >= static_cast<uint64_t>(source_size);
+      auto const row = static_cast<size_type>(index);
+      auto value =
+        (nullify_out_of_bounds && out_of_bounds) ||
+            (validity != nullptr && !bit_is_set(validity, source_offset + row))
+          ? static_cast<unsigned __int128>(0)
+          : static_cast<unsigned __int128>(accessor[row]);
+      auto const block      = output_row / packed_decimal128_column_view::block_size;
+      auto const descriptor = offsets_data[block];
+      auto const width      = static_cast<uint8_t>(descriptor & 0x1f);
+      auto const offset     = descriptor >> 5;
+      auto const slot = output_row % packed_decimal128_column_view::block_size;
+      auto const address =
+        output_payload + offset + static_cast<uint64_t>(slot) * width;
+      switch (width) {
+        case 0: return;
+        case 1: *reinterpret_cast<uint8_t*>(address) = static_cast<uint8_t>(value); return;
+        case 2: *reinterpret_cast<uint16_t*>(address) = static_cast<uint16_t>(value); return;
+        case 4: *reinterpret_cast<uint32_t*>(address) = static_cast<uint32_t>(value); return;
+        case 8: *reinterpret_cast<uint64_t*>(address) = static_cast<uint64_t>(value); return;
+        case 16: *reinterpret_cast<unsigned __int128*>(address) = value; return;
+      }
+      for (uint8_t byte = 0; byte < width; ++byte) {
+        address[byte] = static_cast<uint8_t>(value >> (byte * 8));
+      }
+    });
+
+  return make_packed_decimal128_column(output_size,
+                                       numeric::scale_type{source_column.type().scale()},
+                                       std::move(payload),
+                                       std::move(descriptors),
+                                       {},
+                                       0,
+                                       stream);
+}
 
 /**
  * @brief Function object for gathering a type-erased column.
@@ -658,15 +846,25 @@ std::unique_ptr<table> gather(table_view const& source_table,
 
   for (auto const& source_column : source_table) {
     // The data gather for n columns will be put on the first n streams
-    destination_columns.push_back(
-      cudf::type_dispatcher<dispatch_storage_type>(source_column.type(),
-                                                   column_gatherer{},
-                                                   source_column,
-                                                   gather_map_begin,
-                                                   gather_map_end,
-                                                   bounds_policy == out_of_bounds_policy::NULLIFY,
-                                                   stream,
-                                                   mr));
+    if (source_column.type().id() == type_id::PACKED_DECIMAL128) {
+      destination_columns.push_back(gather_packed_decimal128(
+        source_column,
+        gather_map_begin,
+        gather_map_end,
+        bounds_policy == out_of_bounds_policy::NULLIFY,
+        stream,
+        mr));
+    } else {
+      destination_columns.push_back(
+        cudf::type_dispatcher<dispatch_storage_type>(source_column.type(),
+                                                     column_gatherer{},
+                                                     source_column,
+                                                     gather_map_begin,
+                                                     gather_map_end,
+                                                     bounds_policy == out_of_bounds_policy::NULLIFY,
+                                                     stream,
+                                                     mr));
+    }
   }
 
   auto const needs_new_bitmask = bounds_policy == out_of_bounds_policy::NULLIFY ||
