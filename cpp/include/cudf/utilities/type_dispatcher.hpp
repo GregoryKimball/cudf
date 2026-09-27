@@ -175,6 +175,7 @@ CUDF_TYPE_MAPPING(cudf::list_view, type_id::LIST)
 CUDF_TYPE_MAPPING(numeric::decimal32, type_id::DECIMAL32)
 CUDF_TYPE_MAPPING(numeric::decimal64, type_id::DECIMAL64)
 CUDF_TYPE_MAPPING(numeric::decimal128, type_id::DECIMAL128)
+CUDF_TYPE_MAPPING(cudf::packed_decimal128, type_id::PACKED_DECIMAL128)
 CUDF_TYPE_MAPPING(cudf::struct_view, type_id::STRUCT)
 
 /**

@@ -39,7 +39,9 @@ struct unary_relationally_comparable_functor {
  */
 bool is_relationally_comparable(data_type type)
 {
-  return type_dispatcher(type, unary_relationally_comparable_functor{});
+  return type.id() == type_id::PACKED_DECIMAL128
+           ? true
+           : type_dispatcher(type, unary_relationally_comparable_functor{});
 }
 
 namespace {
@@ -71,7 +73,9 @@ struct unary_equality_comparable_functor {
  */
 bool is_equality_comparable(data_type type)
 {
-  return cudf::type_dispatcher(type, unary_equality_comparable_functor{});
+  return type.id() == type_id::PACKED_DECIMAL128
+           ? true
+           : cudf::type_dispatcher(type, unary_equality_comparable_functor{});
 }
 
 struct is_numeric_impl {
@@ -93,7 +97,11 @@ struct is_numeric_impl {
  * @return true `type` is numeric
  * @return false `type` is not numeric
  */
-bool is_numeric(data_type type) { return cudf::type_dispatcher(type, is_numeric_impl{}); }
+bool is_numeric(data_type type)
+{
+  return type.id() == type_id::PACKED_DECIMAL128 ? false
+                                                  : cudf::type_dispatcher(type, is_numeric_impl{});
+}
 
 struct is_index_type_impl {
   template <typename T>
@@ -347,7 +355,12 @@ struct is_fixed_width_impl {
  * @return true `type` is fixed-width
  * @return false  `type` is variable-width
  */
-bool is_fixed_width(data_type type) { return cudf::type_dispatcher(type, is_fixed_width_impl{}); }
+bool is_fixed_width(data_type type)
+{
+  return type.id() == type_id::PACKED_DECIMAL128
+           ? false
+           : cudf::type_dispatcher(type, is_fixed_width_impl{});
+}
 
 struct is_compound_impl {
   template <typename T>
@@ -369,7 +382,12 @@ struct is_compound_impl {
  * @return true `type` is a compound type
  * @return false `type` is a simple type
  */
-bool is_compound(data_type type) { return cudf::type_dispatcher(type, is_compound_impl{}); }
+bool is_compound(data_type type)
+{
+  return type.id() == type_id::PACKED_DECIMAL128
+           ? true
+           : cudf::type_dispatcher(type, is_compound_impl{});
+}
 
 struct is_nested_impl {
   template <typename T>
@@ -390,7 +408,12 @@ struct is_nested_impl {
  * @return true `type` is a nested type
  * @return false `type` is not a nested type
  */
-bool is_nested(data_type type) { return cudf::type_dispatcher(type, is_nested_impl{}); }
+bool is_nested(data_type type)
+{
+  return type.id() == type_id::PACKED_DECIMAL128
+           ? false
+           : cudf::type_dispatcher(type, is_nested_impl{});
+}
 
 namespace {
 template <typename FromType>

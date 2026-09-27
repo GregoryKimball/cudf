@@ -119,7 +119,7 @@ column_view_base::column_view_base(data_type type,
     CUDF_EXPECTS(nullptr == data, "EMPTY column should have no data.");
     CUDF_EXPECTS(nullptr == null_mask, "EMPTY column should have no null mask.");
   } else if (is_compound(type)) {
-    if (type.id() != type_id::STRING) {
+    if (type.id() != type_id::STRING && type.id() != type_id::PACKED_DECIMAL128) {
       CUDF_EXPECTS(nullptr == data, "Compound (parent) columns cannot have data");
     }
   } else if (size > 0) {

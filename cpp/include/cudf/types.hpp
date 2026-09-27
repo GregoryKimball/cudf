@@ -46,6 +46,7 @@ class mutable_column_view;
 class string_view;
 class list_view;
 class struct_view;
+class packed_decimal128 {};
 class scalar;
 
 // clang-format off
@@ -212,6 +213,7 @@ enum class type_id : int32_t {
   DECIMAL64,               ///< Fixed-point type with int64_t
   DECIMAL128,              ///< Fixed-point type with __int128_t
   STRUCT,                  ///< Struct elements
+  PACKED_DECIMAL128,       ///< Block-packed decimal128 with scale metadata
   // `NUM_TYPE_IDS` must be last!
   NUM_TYPE_IDS  ///< Total number of type ids
 };
@@ -312,7 +314,8 @@ class data_type {
    */
   explicit data_type(type_id id, int32_t scale) : _id{id}, _fixed_point_scale{scale}
   {
-    assert(id == type_id::DECIMAL32 || id == type_id::DECIMAL64 || id == type_id::DECIMAL128);
+    assert(id == type_id::DECIMAL32 || id == type_id::DECIMAL64 || id == type_id::DECIMAL128 ||
+           id == type_id::PACKED_DECIMAL128);
   }
 
   /**
