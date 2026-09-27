@@ -106,6 +106,14 @@ ConfigureTest(
 )
 
 # ##################################################################################################
+# * packed decimal tests --------------------------------------------------------------------------
+ConfigureTest(
+  PACKED_DECIMAL_TEST
+  packed_decimal/packed_decimal128_test.cpp
+  packed_decimal/packed_decimal128_row_test.cu
+)
+
+# ##################################################################################################
 # * scalar tests ----------------------------------------------------------------------------------
 ConfigureTest(SCALAR_TEST scalar/scalar_test.cpp scalar/scalar_device_view_test.cu)
 
