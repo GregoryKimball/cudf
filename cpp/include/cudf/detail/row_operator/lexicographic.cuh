@@ -13,6 +13,7 @@
 #include <cudf/lists/detail/dremel.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/packed_decimal/packed_decimal128.cuh>
 #include <cudf/sorting.hpp>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
@@ -328,8 +329,34 @@ class device_row_comparator {
     template <typename Element>
     __device__ cuda::std::pair<cudf::detail::weak_ordering, int> operator()(
       size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
+      requires(cuda::std::is_same_v<Element, cudf::packed_decimal128>)
+    {
+      if (_check_nulls) {
+        bool const lhs_is_null{_lhs.is_null(lhs_element_index)};
+        bool const rhs_is_null{_rhs.is_null(rhs_element_index)};
+        if (lhs_is_null or rhs_is_null) {
+          return cuda::std::pair(
+            cudf::detail::null_compare(lhs_is_null, rhs_is_null, _null_precedence), _depth);
+        }
+      }
+      auto const lhs = packed_decimal128_device_view{
+        _lhs.child(0).head<uint8_t>(), _lhs.child(1).head<uint64_t>(), _lhs.offset()};
+      auto const rhs = packed_decimal128_device_view{
+        _rhs.child(0).head<uint8_t>(), _rhs.child(1).head<uint64_t>(), _rhs.offset()};
+      auto const lhs_value = numeric::decimal128{
+        lhs[lhs_element_index], numeric::scale_type{_lhs.type().scale()}};
+      auto const rhs_value = numeric::decimal128{
+        rhs[rhs_element_index], numeric::scale_type{_rhs.type().scale()}};
+      return cuda::std::pair(_comparator(lhs_value, rhs_value),
+                             cuda::std::numeric_limits<int>::max());
+    }
+
+    template <typename Element>
+    __device__ cuda::std::pair<cudf::detail::weak_ordering, int> operator()(
+      size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
       requires(cudf::is_relationally_comparable<Element, Element>() and
-               not cudf::is_dictionary<Element>())
+               not cudf::is_dictionary<Element>() and
+               not cuda::std::is_same_v<Element, cudf::packed_decimal128>)
     {
       if (_check_nulls) {
         bool const lhs_is_null{_lhs.is_null(lhs_element_index)};
@@ -382,6 +409,7 @@ class device_row_comparator {
     __device__ cuda::std::pair<cudf::detail::weak_ordering, int> operator()(
       size_type const, size_type const) const noexcept
       requires(not cudf::is_relationally_comparable<Element, Element>() and
+               not cuda::std::is_same_v<Element, cudf::packed_decimal128> and
                (not has_nested_columns or not cudf::is_nested<Element>()))
     {
       CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");
@@ -574,8 +602,13 @@ class device_row_comparator {
                                              r_dremel_i};
 
       cudf::detail::weak_ordering state;
-      cuda::std::tie(state, last_null_depth) =
-        cudf::type_dispatcher(_lhs.column(i).type(), element_comp, lhs_index, rhs_index);
+      if (_lhs.column(i).type().id() == type_id::PACKED_DECIMAL128) {
+        cuda::std::tie(state, last_null_depth) =
+          element_comp.template operator()<packed_decimal128>(lhs_index, rhs_index);
+      } else {
+        cuda::std::tie(state, last_null_depth) =
+          cudf::type_dispatcher(_lhs.column(i).type(), element_comp, lhs_index, rhs_index);
+      }
 
       if (state == cudf::detail::weak_ordering::EQUIVALENT) { continue; }
 

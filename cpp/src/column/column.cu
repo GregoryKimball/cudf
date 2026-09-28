@@ -15,6 +15,7 @@
 #include <cudf/lists/detail/copying.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/null_mask.hpp>
+#include <cudf/packed_decimal/packed_decimal128.hpp>
 #include <cudf/strings/detail/copying.hpp>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/types.hpp>
@@ -249,14 +250,26 @@ struct create_column_from_view {
                                stream,
                                mr);
   }
+
 };
+
+std::unique_ptr<column> copy_column_view(column_view view,
+                                         cuda::stream_ref stream,
+                                         rmm::device_async_resource_ref mr)
+{
+  if (view.type().id() == type_id::PACKED_DECIMAL128) {
+    auto unpacked = cudf::decode_packed_decimal128(view, stream, mr);
+    return cudf::encode_packed_decimal128(unpacked->view(), stream, mr);
+  }
+  return type_dispatcher(view.type(), create_column_from_view{view, stream, mr});
+}
 }  // anonymous namespace
 
 // Copy from a view
 column::column(column_view view, cuda::stream_ref stream, rmm::device_async_resource_ref mr)
   :  // Move is needed here because the dereference operator of unique_ptr returns
      // an lvalue reference, which would otherwise dispatch to the copy constructor
-    column{std::move(*type_dispatcher(view.type(), create_column_from_view{view, stream, mr}))}
+    column{std::move(*copy_column_view(view, stream, mr))}
 {
 }
 

@@ -13,6 +13,7 @@
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/packed_decimal/packed_decimal128.cuh>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/default_stream.hpp>
@@ -129,6 +130,10 @@ class device_row_comparator {
                                        size_type const rhs_index) const noexcept
   {
     auto equal_elements = [lhs_index, rhs_index, this](column_device_view l, column_device_view r) {
+      if (l.type().id() == type_id::PACKED_DECIMAL128) {
+        return element_comparator{check_nulls, l, r, nulls_are_equal, comparator}
+          .template operator()<packed_decimal128>(lhs_index, rhs_index);
+      }
       return cudf::type_dispatcher(
         l.type(),
         element_comparator{check_nulls, l, r, nulls_are_equal, comparator},
@@ -243,8 +248,64 @@ class device_row_comparator {
     template <typename Element>
     __device__ bool operator()(size_type const lhs_element_index,
                                size_type const rhs_element_index) const noexcept
+      requires(cuda::std::is_same_v<Element, cudf::packed_decimal128>)
+    {
+      if (check_nulls) {
+        bool const lhs_is_null{lhs.is_null(lhs_element_index)};
+        bool const rhs_is_null{rhs.is_null(rhs_element_index)};
+        if (lhs_is_null and rhs_is_null) {
+          return nulls_are_equal == null_equality::EQUAL;
+        } else if (lhs_is_null != rhs_is_null) {
+          return false;
+        }
+      }
+
+      auto const lhs_values = packed_decimal128_device_view{
+        lhs.child(0).head<uint8_t>(), lhs.child(1).head<uint64_t>(), lhs.offset()};
+      auto const rhs_value = [&] {
+        if (rhs.type().id() == type_id::PACKED_DECIMAL128) {
+          auto const rhs_values = packed_decimal128_device_view{
+            rhs.child(0).head<uint8_t>(), rhs.child(1).head<uint64_t>(), rhs.offset()};
+          return rhs_values[rhs_element_index];
+        }
+        return rhs.element<numeric::decimal128>(rhs_element_index).value();
+      }();
+      return comparator(lhs_values[lhs_element_index], rhs_value);
+    }
+
+    template <typename Element>
+    __device__ bool operator()(size_type const lhs_element_index,
+                               size_type const rhs_element_index) const noexcept
+      requires(cuda::std::is_same_v<Element, numeric::decimal128>)
+    {
+      if (check_nulls) {
+        bool const lhs_is_null{lhs.is_null(lhs_element_index)};
+        bool const rhs_is_null{rhs.is_null(rhs_element_index)};
+        if (lhs_is_null and rhs_is_null) {
+          return nulls_are_equal == null_equality::EQUAL;
+        } else if (lhs_is_null != rhs_is_null) {
+          return false;
+        }
+      }
+
+      auto const rhs_value = [&] {
+        if (rhs.type().id() == type_id::PACKED_DECIMAL128) {
+          auto const rhs_values = packed_decimal128_device_view{
+            rhs.child(0).head<uint8_t>(), rhs.child(1).head<uint64_t>(), rhs.offset()};
+          return rhs_values[rhs_element_index];
+        }
+        return rhs.element<numeric::decimal128>(rhs_element_index).value();
+      }();
+      return comparator(lhs.element<numeric::decimal128>(lhs_element_index).value(), rhs_value);
+    }
+
+    template <typename Element>
+    __device__ bool operator()(size_type const lhs_element_index,
+                               size_type const rhs_element_index) const noexcept
       requires(cudf::is_equality_comparable<Element, Element>() and
-               not cudf::is_dictionary<Element>())
+               not cudf::is_dictionary<Element>() and
+               not cuda::std::is_same_v<Element, cudf::packed_decimal128> and
+               not cuda::std::is_same_v<Element, numeric::decimal128>)
     {
       if (check_nulls) {
         bool const lhs_is_null{lhs.is_null(lhs_element_index)};
@@ -288,6 +349,7 @@ class device_row_comparator {
     template <typename Element, typename... Args>
     __device__ bool operator()(Args...) const noexcept
       requires(not cudf::is_equality_comparable<Element, Element>() and
+               not cuda::std::is_same_v<Element, cudf::packed_decimal128> and
                (not has_nested_columns or not cudf::is_nested<Element>()))
     {
       CUDF_UNREACHABLE("Attempted to compare elements of uncomparable types.");

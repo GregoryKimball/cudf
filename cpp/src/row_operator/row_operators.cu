@@ -18,6 +18,7 @@
 #include <cudf/detail/utilities/linked_column.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/packed_decimal/packed_decimal128.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/memory_resource.hpp>
 #include <cudf/utilities/type_checks.hpp>
@@ -31,6 +32,41 @@
 namespace cudf {
 namespace detail {
 namespace {
+
+struct normalized_packed_table {
+  table_view view;
+  std::vector<std::unique_ptr<column>> columns;
+};
+
+normalized_packed_table normalize_packed_decimals(
+  table_view const& input,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref())
+{
+  std::vector<column_view> views;
+  std::vector<std::unique_ptr<column>> columns;
+  views.reserve(input.num_columns());
+  for (auto const& col : input) {
+    if (col.type().id() == type_id::PACKED_DECIMAL128) {
+      columns.push_back(decode_packed_decimal128(col, stream, mr));
+      views.push_back(columns.back()->view());
+    } else {
+      views.push_back(col);
+    }
+  }
+  return {table_view{views}, std::move(columns)};
+}
+
+bool row_types_equivalent(column_view const& lhs, column_view const& rhs)
+{
+  auto const lhs_id = lhs.type().id();
+  auto const rhs_id = rhs.type().id();
+  auto const mixed_decimal =
+    (lhs_id == type_id::PACKED_DECIMAL128 && rhs_id == type_id::DECIMAL128) ||
+    (lhs_id == type_id::DECIMAL128 && rhs_id == type_id::PACKED_DECIMAL128);
+  return mixed_decimal ? lhs.type().scale() == rhs.type().scale()
+                       : column_types_equivalent(lhs, rhs);
+}
 
 /**
  * @brief Removes the offsets of struct column's children
@@ -378,7 +414,7 @@ void check_shape_compatibility(table_view const& lhs, table_view const& rhs)
                "Cannot compare tables with different number of columns",
                std::invalid_argument);
   for (size_type i = 0; i < lhs.num_columns(); ++i) {
-    CUDF_EXPECTS(column_types_equivalent(lhs.column(i), rhs.column(i)),
+    CUDF_EXPECTS(row_types_equivalent(lhs.column(i), rhs.column(i)),
                  "Cannot compare tables with different column types",
                  std::invalid_argument);
   }
@@ -706,7 +742,7 @@ std::shared_ptr<preprocessed_table> preprocessed_table::create(
       return table_view{transformed_cvs};
     }();
 
-  auto const has_ranked_children = !transformed_columns.empty();
+  auto const has_ranked_children = not transformed_columns.empty();
   return create(transformed_input,
                 std::move(verticalized_col_depths),
                 std::move(transformed_columns),
@@ -725,20 +761,29 @@ preprocessed_table::create(table_view const& lhs,
 {
   check_shape_compatibility(lhs, rhs);
 
+  auto normalized_lhs = normalize_packed_decimals(lhs, stream);
+  auto normalized_rhs = normalize_packed_decimals(rhs, stream);
+
   auto [decomposed_lhs,
         new_column_order_lhs,
         new_null_precedence_lhs,
         verticalized_col_depths_lhs] =
-    decompose_structs(lhs, decompose_lists_column::NO, column_order, null_precedence);
+    decompose_structs(
+      normalized_lhs.view, decompose_lists_column::NO, column_order, null_precedence);
 
   // Unused variables are new column order and null order for rhs, which are the same as for lhs
   // so we don't need them.
   [[maybe_unused]] auto [decomposed_rhs, unused0, unused1, verticalized_col_depths_rhs] =
-    decompose_structs(rhs, decompose_lists_column::NO, column_order, null_precedence);
+    decompose_structs(
+      normalized_rhs.view, decompose_lists_column::NO, column_order, null_precedence);
 
   // Transform any (nested) lists-of-structs column into lists-of-integers column.
-  std::vector<std::unique_ptr<column>> transformed_columns_lhs;
-  std::vector<std::unique_ptr<column>> transformed_columns_rhs;
+  std::vector<std::unique_ptr<column>> transformed_columns_lhs =
+    std::move(normalized_lhs.columns);
+  std::vector<std::unique_ptr<column>> transformed_columns_rhs =
+    std::move(normalized_rhs.columns);
+  auto const packed_column_count_lhs = transformed_columns_lhs.size();
+  auto const packed_column_count_rhs = transformed_columns_rhs.size();
   auto const [transformed_lhs,
               transformed_rhs] = [&,
                                   &decomposed_lhs          = decomposed_lhs,
@@ -774,8 +819,10 @@ preprocessed_table::create(table_view const& lhs,
 
   // This should be the same for both lhs and rhs but not all the time, such as when one table
   // has 0 rows while the other has >0 rows. So we check separately for each of them.
-  auto const has_ranked_children_lhs = !transformed_columns_lhs.empty();
-  auto const has_ranked_children_rhs = !transformed_columns_rhs.empty();
+  auto const has_ranked_children_lhs =
+    transformed_columns_lhs.size() > packed_column_count_lhs;
+  auto const has_ranked_children_rhs =
+    transformed_columns_rhs.size() > packed_column_count_rhs;
 
   return {create(transformed_lhs,
                  std::move(verticalized_col_depths_lhs),
@@ -849,7 +896,8 @@ std::shared_ptr<preprocessed_table> preprocessed_table::create(
 {
   check_eq_compatibility(t);
 
-  auto [null_pushed_table, nullable_data] = structs::detail::push_down_nulls(t, stream, temp_mr);
+  auto [null_pushed_table, nullable_data] =
+    structs::detail::push_down_nulls(t, stream, temp_mr);
   auto struct_offset_removed_table        = remove_struct_child_offsets(null_pushed_table);
   auto verticalized_t =
     std::get<0>(decompose_structs(struct_offset_removed_table, decompose_lists_column::YES));

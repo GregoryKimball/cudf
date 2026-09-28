@@ -618,7 +618,8 @@ CUDF_HOST_DEVICE constexpr inline bool is_compound()
 {
   return cuda::std::is_same_v<T, cudf::string_view> or
          cuda::std::is_same_v<T, cudf::dictionary32> or cuda::std::is_same_v<T, cudf::list_view> or
-         cuda::std::is_same_v<T, cudf::struct_view>;
+         cuda::std::is_same_v<T, cudf::struct_view> or
+         cuda::std::is_same_v<T, cudf::packed_decimal128>;
 }
 
 /**
