@@ -729,6 +729,10 @@ add_library(
   src/dictionary/replace.cu
   src/dictionary/search.cu
   src/dictionary/set_keys.cu
+  src/run_end_encoded/encode_decode.cu
+  src/run_end_encoded/run_end_encoded_column_view.cpp
+  src/run_end_encoded/run_end_encoded_factories.cpp
+  src/run_end_encoded/sum.cu
   src/filling/calendrical_month_sequence.cu
   src/filling/fill.cu
   src/filling/repeat.cu

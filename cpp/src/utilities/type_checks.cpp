@@ -5,6 +5,7 @@
 
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/utilities/traits.hpp>
 #include <cudf/utilities/type_checks.hpp>
@@ -123,11 +124,19 @@ bool scalars_equal_fn::operator()<struct_view>(scalar const& lhs, scalar const& 
 // as it increases code paths to NxN for N types.
 bool have_same_types(column_view const& lhs, column_view const& rhs)
 {
+  if (lhs.type().id() == type_id::RUN_END_ENCODED) {
+    if (rhs.type().id() != type_id::RUN_END_ENCODED) { return false; }
+    return have_same_types(run_end_encoded_column_view{lhs}.values(),
+                           run_end_encoded_column_view{rhs}.values());
+  }
   return type_dispatcher(lhs.type(), columns_equal_fn{}, lhs, rhs);
 }
 
 bool have_same_types(column_view const& lhs, scalar const& rhs)
 {
+  if (lhs.type().id() == type_id::RUN_END_ENCODED) {
+    return have_same_types(run_end_encoded_column_view{lhs}.values(), rhs);
+  }
   return type_dispatcher(lhs.type(), column_scalar_equal_fn{}, lhs, rhs);
 }
 

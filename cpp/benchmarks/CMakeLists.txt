@@ -166,6 +166,11 @@ ConfigureNVBench(
   join/sort_merge_join.cpp
 )
 
+ConfigureNVBench(
+  RUN_END_ENCODED_JOIN_NVBENCH
+  join/join_run_end_encoded.cpp
+)
+
 # ##################################################################################################
 # * iterator benchmark ----------------------------------------------------------------------------
 ConfigureNVBench(ITERATOR_NVBENCH iterator/iterator.cu)
@@ -254,6 +259,12 @@ ConfigureNVBench(
 # ##################################################################################################
 # * hashing benchmark -----------------------------------------------------------------------------
 ConfigureNVBench(HASHING_NVBENCH hashing/hash.cpp hashing/partition.cpp)
+
+# ##################################################################################################
+# * run-end encoded benchmark ---------------------------------------------------------------------
+ConfigureNVBench(
+  RUN_END_ENCODED_NVBENCH run_end_encoded/run_end_encoded.cpp
+)
 
 # ##################################################################################################
 # * hybrid scan filters benchmark

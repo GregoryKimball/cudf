@@ -13,6 +13,7 @@
 #include <cudf/lists/detail/dremel.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/run_end_encoded/run_end_encoded_column_device_view.cuh>
 #include <cudf/sorting.hpp>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
@@ -318,6 +319,32 @@ class device_row_comparator {
     }
 
     /**
+     * @brief Compares logical elements in two run-end encoded columns.
+     */
+    __device__ cuda::std::pair<cudf::detail::weak_ordering, int> compare_run_end_encoded(
+      size_type const lhs_element_index, size_type const rhs_element_index) const noexcept
+    {
+      if (_check_nulls) {
+        bool const lhs_is_null{_lhs.is_null(lhs_element_index)};
+        bool const rhs_is_null{_rhs.is_null(rhs_element_index)};
+        if (lhs_is_null or rhs_is_null) {
+          return cuda::std::pair(
+            cudf::detail::null_compare(lhs_is_null, rhs_is_null, _null_precedence), _depth);
+        }
+      }
+
+      auto const lhs_ree = run_end_encoded_column_device_view{_lhs};
+      auto const rhs_ree = run_end_encoded_column_device_view{_rhs};
+      auto const lvalues = _lhs.child(run_end_encoded_values_column_index);
+      auto const rvalues = _rhs.child(run_end_encoded_values_column_index);
+      return cudf::type_dispatcher<dispatch_void_if_nested>(
+        lvalues.type(),
+        element_comparator{_check_nulls, lvalues, rvalues, _null_precedence, _depth, _comparator},
+        lhs_ree.find_run(lhs_element_index),
+        rhs_ree.find_run(rhs_element_index));
+    }
+
+    /**
      * @brief Performs a relational comparison between the specified elements
      *
      * @param lhs_element_index The index of the first element
@@ -574,8 +601,13 @@ class device_row_comparator {
                                              r_dremel_i};
 
       cudf::detail::weak_ordering state;
-      cuda::std::tie(state, last_null_depth) =
-        cudf::type_dispatcher(_lhs.column(i).type(), element_comp, lhs_index, rhs_index);
+      if (_lhs.column(i).type().id() == type_id::RUN_END_ENCODED) {
+        cuda::std::tie(state, last_null_depth) =
+          element_comp.compare_run_end_encoded(lhs_index, rhs_index);
+      } else {
+        cuda::std::tie(state, last_null_depth) =
+          cudf::type_dispatcher(_lhs.column(i).type(), element_comp, lhs_index, rhs_index);
+      }
 
       if (state == cudf::detail::weak_ordering::EQUIVALENT) { continue; }
 

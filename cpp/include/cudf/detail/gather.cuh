@@ -16,6 +16,9 @@
 #include <cudf/dictionary/dictionary_factories.hpp>
 #include <cudf/lists/detail/gather.cuh>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_device_view.cuh>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_factories.hpp>
 #include <cudf/strings/detail/gather.cuh>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table.hpp>
@@ -33,6 +36,9 @@
 #include <cuda/stream>
 #include <thrust/gather.h>
 #include <thrust/logical.h>
+#include <thrust/copy.h>
+#include <thrust/count.h>
+#include <thrust/transform.h>
 
 #include <algorithm>
 
@@ -178,6 +184,167 @@ struct column_gatherer {
       source_column, gather_map_begin, gather_map_end, nullify_out_of_bounds, stream, mr);
   }
 };
+
+template <typename MapIterator>
+struct ree_gather_row {
+  column_device_view source;
+  MapIterator map;
+  bool nullify_out_of_bounds;
+
+  using map_type = typename std::iterator_traits<MapIterator>::value_type;
+
+  [[nodiscard]] __device__ bool in_bounds(map_type index) const
+  {
+    if constexpr (std::is_signed_v<map_type>) {
+      return index >= 0 and index < source.size();
+    } else {
+      return index < static_cast<map_type>(source.size());
+    }
+  }
+
+  [[nodiscard]] __device__ bool valid(size_type output_row) const
+  {
+    auto const index = map[output_row];
+    return (not nullify_out_of_bounds or in_bounds(index)) and
+           source.is_valid(static_cast<size_type>(index));
+  }
+
+  [[nodiscard]] __device__ size_type source_row(size_type output_row) const
+  {
+    return static_cast<size_type>(map[output_row]);
+  }
+};
+
+template <typename T, typename MapIterator>
+struct ree_is_run_start {
+  ree_gather_row<MapIterator> rows;
+  using value_type = device_storage_type_t<T>;
+
+  __device__ bool operator()(size_type row) const
+  {
+    if (row == 0) { return true; }
+    auto const valid      = rows.valid(row);
+    auto const prev_valid = rows.valid(row - 1);
+    if (valid != prev_valid) { return true; }
+    if (not valid) { return false; }
+
+    auto const ree = run_end_encoded_column_device_view{rows.source};
+    return ree.value<value_type>(rows.source_row(row)) !=
+           ree.value<value_type>(rows.source_row(row - 1));
+  }
+};
+
+template <typename T, typename MapIterator>
+struct ree_is_run_end {
+  ree_is_run_start<T, MapIterator> starts;
+  size_type size;
+
+  __device__ bool operator()(size_type row) const
+  {
+    return row + 1 == size or starts(row + 1);
+  }
+};
+
+template <typename T, typename MapIterator>
+struct ree_gather_value {
+  ree_gather_row<MapIterator> rows;
+  using value_type = device_storage_type_t<T>;
+
+  __device__ value_type operator()(size_type output_row) const
+  {
+    if (not rows.valid(output_row)) { return value_type{}; }
+    return run_end_encoded_column_device_view{rows.source}.value<value_type>(
+      rows.source_row(output_row));
+  }
+};
+
+struct ree_column_gatherer {
+  template <typename T, typename MapIterator>
+  std::unique_ptr<column> operator()(column_view const& source_column,
+                                     MapIterator gather_map_begin,
+                                     MapIterator gather_map_end,
+                                     bool nullify_out_of_bounds,
+                                     cuda::stream_ref stream,
+                                     cudf::memory_resources mr) const
+    requires(cudf::is_fixed_width<T>())
+  {
+    using value_type       = device_storage_type_t<T>;
+    auto const output_size = static_cast<size_type>(cudf::distance(gather_map_begin, gather_map_end));
+    auto const values_type = run_end_encoded_column_view{source_column}.values_type();
+    if (output_size == 0) { return make_empty_run_end_encoded_column(values_type); }
+
+    auto const output_mr = mr.get_output_mr();
+    auto const temp_mr   = mr.get_temporary_mr();
+    auto d_source        = column_device_view::create(source_column, stream, temp_mr);
+    auto const rows =
+      ree_gather_row<MapIterator>{*d_source, gather_map_begin, nullify_out_of_bounds};
+    auto const starts = ree_is_run_start<T, MapIterator>{rows};
+    auto const begin  = cuda::counting_iterator<size_type>{0};
+    auto const end    = begin + output_size;
+    auto const num_runs =
+      static_cast<size_type>(thrust::count_if(rmm::exec_policy(stream, temp_mr), begin, end, starts));
+
+    auto run_starts = make_fixed_width_column(
+      data_type{type_id::INT32}, num_runs, mask_state::UNALLOCATED, stream, temp_mr);
+    auto run_ends = make_fixed_width_column(
+      data_type{type_id::INT32}, num_runs, mask_state::UNALLOCATED, stream, output_mr);
+    auto values =
+      make_fixed_width_column(values_type, num_runs, mask_state::UNALLOCATED, stream, output_mr);
+
+    thrust::copy_if(rmm::exec_policy_nosync(stream, temp_mr),
+                    begin,
+                    end,
+                    run_starts->mutable_view().begin<size_type>(),
+                    starts);
+    thrust::copy_if(rmm::exec_policy_nosync(stream, temp_mr),
+                    begin,
+                    end,
+                    run_ends->mutable_view().begin<size_type>(),
+                    ree_is_run_end<T, MapIterator>{starts, output_size});
+    thrust::transform(rmm::exec_policy_nosync(stream, temp_mr),
+                      run_ends->view().begin<size_type>(),
+                      run_ends->view().end<size_type>(),
+                      run_ends->mutable_view().begin<size_type>(),
+                      [] __device__(size_type row) { return row + 1; });
+    thrust::transform(rmm::exec_policy_nosync(stream, temp_mr),
+                      run_starts->view().begin<size_type>(),
+                      run_starts->view().end<size_type>(),
+                      values->mutable_view().begin<value_type>(),
+                      ree_gather_value<T, MapIterator>{rows});
+
+    return make_run_end_encoded_column(output_size,
+                                       std::move(run_ends),
+                                       std::move(values),
+                                       0,
+                                       rmm::device_buffer{});
+  }
+
+  template <typename T, typename... Args>
+  std::unique_ptr<column> operator()(Args&&...) const
+    requires(not cudf::is_fixed_width<T>())
+  {
+    CUDF_FAIL("Run-end encoded values must be fixed-width", cudf::data_type_error);
+  }
+};
+
+template <typename MapIterator>
+std::unique_ptr<column> gather_run_end_encoded(column_view const& source_column,
+                                                MapIterator gather_map_begin,
+                                                MapIterator gather_map_end,
+                                                bool nullify_out_of_bounds,
+                                                cuda::stream_ref stream,
+                                                cudf::memory_resources mr)
+{
+  auto const values_type = run_end_encoded_column_view{source_column}.values_type();
+  return cudf::type_dispatcher(values_type,
+                               ree_column_gatherer{},
+                               source_column,
+                               gather_map_begin,
+                               gather_map_end,
+                               nullify_out_of_bounds,
+                               stream,
+                               mr);
+}
 
 /**
  * @brief Function object for gathering a type-erased column.
@@ -658,15 +825,25 @@ std::unique_ptr<table> gather(table_view const& source_table,
 
   for (auto const& source_column : source_table) {
     // The data gather for n columns will be put on the first n streams
-    destination_columns.push_back(
-      cudf::type_dispatcher<dispatch_storage_type>(source_column.type(),
-                                                   column_gatherer{},
-                                                   source_column,
-                                                   gather_map_begin,
-                                                   gather_map_end,
-                                                   bounds_policy == out_of_bounds_policy::NULLIFY,
-                                                   stream,
-                                                   mr));
+    if (source_column.type().id() == type_id::RUN_END_ENCODED) {
+      destination_columns.push_back(
+        gather_run_end_encoded(source_column,
+                               gather_map_begin,
+                               gather_map_end,
+                               bounds_policy == out_of_bounds_policy::NULLIFY,
+                               stream,
+                               mr));
+    } else {
+      destination_columns.push_back(
+        cudf::type_dispatcher<dispatch_storage_type>(source_column.type(),
+                                                     column_gatherer{},
+                                                     source_column,
+                                                     gather_map_begin,
+                                                     gather_map_end,
+                                                     bounds_policy == out_of_bounds_policy::NULLIFY,
+                                                     stream,
+                                                     mr));
+    }
   }
 
   auto const needs_new_bitmask = bounds_policy == out_of_bounds_policy::NULLIFY ||

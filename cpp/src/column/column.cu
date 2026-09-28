@@ -9,6 +9,7 @@
 #include <cudf/column/column_view.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/detail/copy.hpp>
+#include <cudf/detail/gather.cuh>
 #include <cudf/detail/null_mask.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/dictionary/dictionary_column_view.hpp>
@@ -256,7 +257,19 @@ struct create_column_from_view {
 column::column(column_view view, cuda::stream_ref stream, rmm::device_async_resource_ref mr)
   :  // Move is needed here because the dereference operator of unique_ptr returns
      // an lvalue reference, which would otherwise dispatch to the copy constructor
-    column{std::move(*type_dispatcher(view.type(), create_column_from_view{view, stream, mr}))}
+    column{std::move(*[&]() {
+      if (view.type().id() == type_id::RUN_END_ENCODED) {
+        auto const begin = cuda::counting_iterator<size_type>{0};
+        auto gathered    = cudf::detail::gather(table_view{{view}},
+                                                begin,
+                                                begin + view.size(),
+                                                out_of_bounds_policy::DONT_CHECK,
+                                                stream,
+                                                mr);
+        return std::move(gathered->release().front());
+      }
+      return type_dispatcher(view.type(), create_column_from_view{view, stream, mr});
+    }())}
 {
 }
 

@@ -30,6 +30,9 @@ namespace CUDF_EXPORT cudf {
  *
  * An empty column contains zero elements and no validity mask.
  *
+ * @throws cudf::data_type_error if `type` requires child type information, including
+ * `RUN_END_ENCODED`
+ *
  * @param[in] type The column data type
  * @return Empty column with desired type
  */
@@ -39,6 +42,9 @@ std::unique_ptr<column> make_empty_column(data_type type);
  * @brief Creates an empty column of the specified type.
  *
  * An empty column contains zero elements and no validity mask.
+ *
+ * @throws cudf::data_type_error if `id` requires child type information, including
+ * `RUN_END_ENCODED`
  *
  * @param[in] id The column type id
  * @return Empty column with specified type

@@ -1,0 +1,97 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#pragma once
+
+#include <cudf/column/column.hpp>
+#include <cudf/column/column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
+#include <cudf/scalar/scalar.hpp>
+#include <cudf/utilities/default_stream.hpp>
+#include <cudf/utilities/memory_resource.hpp>
+
+#include <cuda/stream>
+
+namespace CUDF_EXPORT cudf {
+namespace run_end_encoded {
+
+/**
+ * @brief Encodes adjacent equal rows as run ends and physical values.
+ *
+ * Validity participates in run equality: a valid row and a null row never share a run, while
+ * adjacent null rows do. The physical value stored for a null run is unspecified. The input must
+ * have a fixed-width, decimal, or chrono type and must not itself be run-end encoded.
+ *
+ * @param input Column to encode
+ * @param stream CUDA stream used for device work
+ * @param mr Memory resources used for temporary and output allocations
+ * @return Canonical owning run-end encoded column
+ */
+std::unique_ptr<column> encode(column_view const& input,
+                               cuda::stream_ref stream   = cudf::get_default_stream(),
+                               cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Decodes a run-end encoded column to its logical fixed-width values.
+ *
+ * Sliced inputs resolve rows using `input.offset() + row`. The returned column has the values-child
+ * type and a copy of the sliced parent logical null mask.
+ *
+ * @param input Run-end encoded input
+ * @param stream CUDA stream used for device work
+ * @param mr Memory resources used for temporary and output allocations
+ * @return Owning decoded column
+ */
+std::unique_ptr<column> decode(run_end_encoded_column_view const& input,
+                               cuda::stream_ref stream   = cudf::get_default_stream(),
+                               cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Decodes a RUN_END_ENCODED column to its logical fixed-width values.
+ *
+ * @throws cudf::logic_error if `input` is not a structurally valid RUN_END_ENCODED column
+ */
+std::unique_ptr<column> decode(column_view const& input,
+                               cuda::stream_ref stream   = cudf::get_default_stream(),
+                               cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Computes a whole-column sum directly from non-null numeric runs.
+ *
+ * Each physical value is multiplied by its logical run length and the weighted values are reduced
+ * in `O(number_of_runs)` work. Sliced inputs are supported; boundary runs are clipped to the
+ * logical slice. No decoded logical-row column is materialized.
+ *
+ * The input must be non-empty, non-nullable, and have numeric (non-`BOOL8`) values. The output must
+ * be a numeric type at least as wide as the input and must preserve integral versus floating-point
+ * representation. For example, `INT32` may produce `INT32` or `INT64`, while `INT64` may only
+ * produce `INT64`.
+ *
+ * @param input Run-end encoded input
+ * @param output_type Numeric scalar output type
+ * @param stream CUDA stream used for device work
+ * @param mr Memory resources used for temporary and output allocations
+ * @return Valid scalar containing the weighted sum
+ *
+ * @throws cudf::logic_error if the input is empty or nullable
+ * @throws cudf::data_type_error if the input values or output type are unsupported
+ */
+std::unique_ptr<scalar> sum(
+  run_end_encoded_column_view const& input,
+  data_type output_type,
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Computes a whole-column run-native sum from a RUN_END_ENCODED column.
+ */
+std::unique_ptr<scalar> sum(
+  column_view const& input,
+  data_type output_type,
+  cuda::stream_ref stream   = cudf::get_default_stream(),
+  cudf::memory_resources mr = cudf::get_current_device_resource_ref());
+
+}  // namespace run_end_encoded
+}  // namespace CUDF_EXPORT cudf

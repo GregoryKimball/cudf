@@ -16,6 +16,7 @@
 #include <cudf/hashing/detail/hashing.hpp>
 #include <cudf/lists/list_device_view.cuh>
 #include <cudf/lists/lists_column_device_view.cuh>
+#include <cudf/run_end_encoded/run_end_encoded_column_device_view.cuh>
 #include <cudf/structs/structs_column_device_view.cuh>
 #include <cudf/table/table_device_view.cuh>
 #include <cudf/utilities/default_stream.hpp>
@@ -118,6 +119,9 @@ class device_row_hasher {
   __device__ result_type operator()(size_type row_index) const noexcept
   {
     auto const hasher = [row_index, this](auto const& column) {
+      if (column.type().id() == type_id::RUN_END_ENCODED) {
+        return element_hasher_adapter{_check_nulls, _seed}.hash_run_end_encoded(column, row_index);
+      }
       return cudf::type_dispatcher<dispatch_storage_type>(
         column.type(), element_hasher_adapter{_check_nulls, _seed}, column, row_index);
     };
@@ -149,6 +153,20 @@ class device_row_hasher {
     __device__ element_hasher_adapter(Nullate check_nulls, result_type seed) noexcept
       : _element_hasher(check_nulls, seed), _check_nulls(check_nulls)
     {
+    }
+
+    /**
+     * @brief Hashes the logical value of a run-end encoded element.
+     */
+    __device__ result_type hash_run_end_encoded(column_device_view const& col,
+                                                size_type row_index) const noexcept
+    {
+      if (_check_nulls && col.is_null(row_index)) { return NULL_HASH; }
+
+      auto const ree    = run_end_encoded_column_device_view{col};
+      auto const values = col.child(run_end_encoded_values_column_index);
+      return type_dispatcher<dispatch_storage_type>(
+        values.type(), _element_hasher, values, ree.find_run(row_index));
     }
 
     template <typename T>

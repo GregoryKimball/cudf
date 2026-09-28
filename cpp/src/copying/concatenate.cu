@@ -5,6 +5,7 @@
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_device_view.cuh>
+#include <cudf/column/column_factories.hpp>
 #include <cudf/concatenate.hpp>
 #include <cudf/detail/concatenate_masks.hpp>
 #include <cudf/detail/copy.hpp>
@@ -19,6 +20,8 @@
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/dictionary/detail/concatenate.hpp>
 #include <cudf/lists/detail/concatenate.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_factories.hpp>
 #include <cudf/strings/detail/concatenate.hpp>
 #include <cudf/structs/detail/concatenate.hpp>
 #include <cudf/table/table.hpp>
@@ -35,6 +38,7 @@
 #include <cuda/stream>
 #include <thrust/binary_search.h>
 #include <thrust/copy.h>
+#include <thrust/count.h>
 #include <thrust/execution_policy.h>
 #include <thrust/host_vector.h>
 #include <thrust/transform_scan.h>
@@ -350,6 +354,215 @@ struct concatenate_dispatch {
   }
 };
 
+template <typename T>
+struct ree_physical_run_start {
+  column_device_view values;
+  column_device_view validity;
+  using value_type = device_storage_type_t<T>;
+
+  __device__ bool operator()(size_type run) const
+  {
+    if (run == 0) { return true; }
+    auto const valid      = validity.element<bool>(run);
+    auto const prev_valid = validity.element<bool>(run - 1);
+    if (valid != prev_valid) { return true; }
+    return valid && values.element<value_type>(run) != values.element<value_type>(run - 1);
+  }
+};
+
+struct coalesce_ree_runs {
+  template <typename T>
+  std::unique_ptr<column> operator()(column_view const& candidate_ends,
+                                     column_view const& candidate_values,
+                                     column_view const& candidate_validity,
+                                     size_type logical_size,
+                                     size_type null_count,
+                                     rmm::device_buffer&& null_mask,
+                                     cuda::stream_ref stream,
+                                     rmm::device_async_resource_ref mr) const
+    requires(cudf::is_fixed_width<T>())
+  {
+    using value_type = device_storage_type_t<T>;
+    auto const temp_mr = cudf::get_current_device_resource_ref();
+    auto d_values      = column_device_view::create(candidate_values, stream, temp_mr);
+    auto d_validity    = column_device_view::create(candidate_validity, stream, temp_mr);
+    auto const starts  = ree_physical_run_start<T>{*d_values, *d_validity};
+    auto const begin   = cuda::counting_iterator<size_type>{0};
+    auto const end     = begin + candidate_ends.size();
+    auto const num_runs =
+      static_cast<size_type>(thrust::count_if(rmm::exec_policy(stream, temp_mr), begin, end, starts));
+    auto run_ends = make_fixed_width_column(
+      data_type{type_id::INT32}, num_runs, mask_state::UNALLOCATED, stream, mr);
+    auto values = make_fixed_width_column(
+      candidate_values.type(), num_runs, mask_state::UNALLOCATED, stream, mr);
+
+    thrust::copy_if(rmm::exec_policy_nosync(stream, temp_mr),
+                    candidate_values.begin<value_type>(),
+                    candidate_values.end<value_type>(),
+                    begin,
+                    values->mutable_view().begin<value_type>(),
+                    starts);
+    thrust::copy_if(rmm::exec_policy_nosync(stream, temp_mr),
+                    candidate_ends.begin<size_type>(),
+                    candidate_ends.end<size_type>(),
+                    begin,
+                    run_ends->mutable_view().begin<size_type>(),
+                    [starts, count = candidate_ends.size()] __device__(size_type run) {
+                      return run + 1 == count or starts(run + 1);
+                    });
+    return make_run_end_encoded_column(logical_size,
+                                       std::move(run_ends),
+                                       std::move(values),
+                                       null_count,
+                                       std::move(null_mask));
+  }
+
+  template <typename T, typename... Args>
+  std::unique_ptr<column> operator()(Args&&...) const
+    requires(not cudf::is_fixed_width<T>())
+  {
+    CUDF_FAIL("Run-end encoded values must be fixed-width", cudf::data_type_error);
+  }
+};
+
+std::unique_ptr<column> concatenate_run_end_encoded(host_span<column_view const> views,
+                                                    cuda::stream_ref stream,
+                                                    rmm::device_async_resource_ref mr)
+{
+  std::vector<std::unique_ptr<column>> canonical;
+  canonical.reserve(views.size());
+  for (auto const& view : views) {
+    if (view.is_empty()) { continue; }
+
+    auto const ree         = run_end_encoded_column_view{view};
+    auto const slice_begin = ree.offset();
+    auto const slice_end   = ree.offset() + ree.size();
+    auto const first = static_cast<size_type>(
+      thrust::upper_bound(rmm::exec_policy(stream),
+                          ree.run_ends().begin<size_type>(),
+                          ree.run_ends().end<size_type>(),
+                          slice_begin) -
+      ree.run_ends().begin<size_type>());
+    auto const last = static_cast<size_type>(
+      thrust::upper_bound(rmm::exec_policy(stream),
+                          ree.run_ends().begin<size_type>(),
+                          ree.run_ends().end<size_type>(),
+                          slice_end - 1) -
+      ree.run_ends().begin<size_type>());
+    auto const num_runs = last - first + 1;
+
+    auto run_ends = make_fixed_width_column(
+      data_type{type_id::INT32}, num_runs, mask_state::UNALLOCATED, stream, mr);
+    thrust::transform(rmm::exec_policy_nosync(stream),
+                      ree.run_ends().begin<size_type>() + first,
+                      ree.run_ends().begin<size_type>() + last + 1,
+                      run_ends->mutable_view().begin<size_type>(),
+                      [slice_begin, slice_end] __device__(size_type end) {
+                        return (end < slice_end ? end : slice_end) - slice_begin;
+                      });
+    auto const values_slice = cudf::slice(ree.values(), {first, last + 1}).front();
+    auto values             = std::make_unique<column>(values_slice, stream, mr);
+    auto const null_count =
+      ree.parent().nullable()
+        ? cudf::detail::count_unset_bits(
+            ree.parent().null_mask(), slice_begin, slice_end, stream)
+        : 0;
+    canonical.push_back(make_run_end_encoded_column(
+      ree.size(),
+      std::move(run_ends),
+      std::move(values),
+      null_count,
+      cudf::detail::copy_bitmask(ree.parent(), stream, mr)));
+  }
+  if (canonical.empty()) {
+    return make_empty_run_end_encoded_column(
+      run_end_encoded_column_view{views.front()}.values_type());
+  }
+
+  std::vector<std::unique_ptr<column>> adjusted_ends;
+  std::vector<std::unique_ptr<column>> run_validity;
+  std::vector<column_view> values_views;
+  std::vector<column_view> parent_views;
+  adjusted_ends.reserve(canonical.size());
+  run_validity.reserve(canonical.size());
+  values_views.reserve(canonical.size());
+  parent_views.reserve(canonical.size());
+
+  size_type logical_offset = 0;
+  for (auto const& col : canonical) {
+    auto const ree = run_end_encoded_column_view{col->view()};
+    auto ends      = make_fixed_width_column(
+      data_type{type_id::INT32}, ree.num_runs(), mask_state::UNALLOCATED, stream, mr);
+    thrust::transform(rmm::exec_policy_nosync(stream),
+                      ree.run_ends().begin<size_type>(),
+                      ree.run_ends().end<size_type>(),
+                      ends->mutable_view().begin<size_type>(),
+                      [logical_offset] __device__(size_type end) { return end + logical_offset; });
+
+    auto validity =
+      make_fixed_width_column(data_type{type_id::BOOL8},
+                              ree.num_runs(),
+                              mask_state::UNALLOCATED,
+                              stream,
+                              cudf::get_current_device_resource_ref());
+    auto d_parent = column_device_view::create(ree.parent(), stream);
+    auto d_ends   = column_device_view::create(ree.run_ends(), stream);
+    thrust::transform(
+      rmm::exec_policy_nosync(stream),
+      cuda::counting_iterator<size_type>{0},
+      cuda::counting_iterator<size_type>{ree.num_runs()},
+      validity->mutable_view().begin<bool>(),
+      [parent = *d_parent, run_ends = *d_ends] __device__(size_type run) {
+        auto const run_start = run == 0 ? 0 : run_ends.element<size_type>(run - 1);
+        return parent.is_valid(run_start);
+      });
+
+    logical_offset += ree.size();
+    values_views.push_back(ree.values());
+    parent_views.push_back(ree.parent());
+    adjusted_ends.push_back(std::move(ends));
+    run_validity.push_back(std::move(validity));
+  }
+
+  std::vector<column_view> ends_views;
+  std::vector<column_view> validity_views;
+  std::transform(adjusted_ends.begin(),
+                 adjusted_ends.end(),
+                 std::back_inserter(ends_views),
+                 [](auto const& col) { return col->view(); });
+  std::transform(run_validity.begin(),
+                 run_validity.end(),
+                 std::back_inserter(validity_views),
+                 [](auto const& col) { return col->view(); });
+
+  auto candidate_ends     = cudf::concatenate(ends_views, stream, mr);
+  auto candidate_values   = cudf::concatenate(values_views, stream, mr);
+  auto candidate_validity = cudf::concatenate(validity_views, stream, mr);
+
+  auto const has_nulls = std::any_of(
+    parent_views.begin(), parent_views.end(), [](auto const& view) { return view.has_nulls(); });
+  auto null_mask  = has_nulls
+                      ? cudf::detail::create_null_mask(
+                          logical_offset, mask_state::UNINITIALIZED, stream, mr)
+                      : rmm::device_buffer{};
+  auto null_count = has_nulls
+                      ? concatenate_masks(parent_views,
+                                          static_cast<bitmask_type*>(null_mask.data()),
+                                          stream)
+                      : 0;
+
+  return type_dispatcher(run_end_encoded_column_view{canonical.front()->view()}.values_type(),
+                         coalesce_ree_runs{},
+                         candidate_ends->view(),
+                         candidate_values->view(),
+                         candidate_validity->view(),
+                         logical_offset,
+                         null_count,
+                         std::move(null_mask),
+                         stream,
+                         mr);
+}
+
 template <>
 std::unique_ptr<column> concatenate_dispatch::operator()<cudf::dictionary32>()
 {
@@ -496,6 +709,8 @@ void bounds_and_type_check(host_span<column_view const> cols, cuda::stream_ref s
                "Type mismatch in columns to concatenate.",
                cudf::data_type_error);
 
+  if (cols.front().type().id() == type_id::RUN_END_ENCODED) { return; }
+
   // traverse children
   cudf::type_dispatcher(cols.front().type(), traverse_children{}, cols, stream);
 }
@@ -529,6 +744,9 @@ std::unique_ptr<column> concatenate(std::span<column_view const> columns_to_conc
       });
     return std::make_unique<column>(
       data_type(type_id::EMPTY), length, rmm::device_buffer{}, rmm::device_buffer{}, length);
+  }
+  if (columns_to_concat.front().type().id() == type_id::RUN_END_ENCODED) {
+    return concatenate_run_end_encoded(views_as_host_span, stream, mr);
   }
   return type_dispatcher<dispatch_storage_type>(
     columns_to_concat.front().type(), concatenate_dispatch{views_as_host_span, stream, mr});

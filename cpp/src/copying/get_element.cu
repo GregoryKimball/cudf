@@ -14,6 +14,8 @@
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/lists/detail/copying.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/run_end_encoded/run_end_encoded_column_device_view.cuh>
+#include <cudf/run_end_encoded/run_end_encoded_column_view.hpp>
 #include <cudf/scalar/scalar_device_view.cuh>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -184,6 +186,27 @@ std::unique_ptr<scalar> get_element(column_view const& input,
                                     rmm::device_async_resource_ref mr)
 {
   CUDF_EXPECTS(index >= 0 and index < input.size(), "Index out of bounds", std::out_of_range);
+  if (input.type().id() == type_id::RUN_END_ENCODED) {
+    auto const ree = run_end_encoded_column_view{input};
+    if (not is_element_valid_sync(input, index, stream)) {
+      return make_default_constructed_scalar(ree.values_type(), stream, mr);
+    }
+
+    cudf::detail::device_scalar<size_type> run_index{
+      0, stream, cudf::get_current_device_resource_ref()};
+    auto d_input = column_device_view::create(input, stream);
+    device_single_thread(
+      [result = run_index.data(), input = *d_input, index] __device__ {
+        *result = run_end_encoded_column_device_view{input}.find_run(index);
+      },
+      stream);
+    return type_dispatcher(ree.values_type(),
+                           get_element_functor{},
+                           ree.values(),
+                           run_index.value(stream),
+                           stream,
+                           mr);
+  }
   return type_dispatcher(input.type(), get_element_functor{}, input, index, stream, mr);
 }
 
