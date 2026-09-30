@@ -20,6 +20,9 @@
 #include <format>
 #include <fstream>
 #include <future>
+#include <map>
+#include <mutex>
+#include <utility>
 
 namespace CUDF_EXPORT cudf {
 
@@ -580,6 +583,26 @@ bundle={}
 
   auto lib = fut.get();
   return kernel{lib, lib->get_kernel("cudf_kernel_entry")};
+}
+
+kernel get_linked_kernel(std::span<uint8_t const> binary)
+{
+  CUDF_FUNC_RANGE();
+
+  // The context initializes rtcx's driver entry points used by rtcx::load_library.
+  [[maybe_unused]] auto& ctx = cudf::get_context();
+
+  auto digest = XXH3_128bits(binary.data(), binary.size());
+  auto key    = std::pair{digest.high64, digest.low64};
+
+  // Intentionally leaked: unloading libraries during static destruction can race driver shutdown.
+  static auto* libraries = new std::map<std::pair<uint64_t, uint64_t>, rtcx::library>{};
+  static std::mutex lock;
+
+  std::lock_guard guard{lock};
+  auto it = libraries->find(key);
+  if (it == libraries->end()) { it = libraries->emplace(key, rtcx::load_library(binary)).first; }
+  return kernel{it->second, it->second->get_kernel("cudf_kernel_entry")};
 }
 
 }  // namespace CUDF_EXPORT cudf
