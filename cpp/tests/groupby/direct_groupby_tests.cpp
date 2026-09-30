@@ -9,6 +9,7 @@
 
 #include <cudf/aggregation.hpp>
 #include <cudf/detail/groupby/direct_groupby.hpp>
+#include <cudf/fixed_point/fixed_point.hpp>
 #include <cudf/groupby.hpp>
 #include <cudf/groupby/direct_groupby.hpp>
 #include <cudf/sorting.hpp>
@@ -150,6 +151,21 @@ TEST_P(DirectGroupbyPathTest, SmallCapacityWithNulls)
                                                                         input.doubles.end());
     expect_matches_groupby(keys, {ints, doubles}, all_supported_aggs(), capacity, GetParam());
   }
+}
+
+TEST_P(DirectGroupbyPathTest, Decimal128Sum)
+{
+  auto const input = make_input(20000, 1000, 3);
+  auto const keys  = keys_t(input.keys.begin(), input.keys.end());
+  auto const reps  = std::vector<__int128_t>(input.ints.begin(), input.ints.end());
+  auto const vals  = cudf::test::fixed_point_column_wrapper<__int128_t>(
+    reps.begin(), reps.end(), input.valids.begin(), numeric::scale_type{-2});
+  std::vector<agg_factory> const aggs{
+    [] { return cudf::make_sum_aggregation<cudf::groupby_aggregation>(); },
+    [] { return cudf::make_count_aggregation<cudf::groupby_aggregation>(); },
+    [] { return cudf::make_mean_aggregation<cudf::groupby_aggregation>(); },
+  };
+  expect_matches_groupby(keys, {vals}, aggs, 1000, GetParam());
 }
 
 TEST_P(DirectGroupbyPathTest, AllNullGroupIsRetained)

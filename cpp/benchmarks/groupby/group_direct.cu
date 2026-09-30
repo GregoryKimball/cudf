@@ -76,9 +76,15 @@ void nvbench_direct_groupby(nvbench::state& state)
   auto const null_pct      = state.get_int64("null_pct");
   auto const algorithm     = state.get_string("algorithm");
   auto const aggs          = state.get_string("aggs");
+  auto const value_type    = state.get_string("value_type");
 
   if (static_cast<std::int64_t>(capacity) > static_cast<std::int64_t>(num_rows)) {
     state.skip("capacity larger than num_rows");
+    return;
+  }
+  // Hash groupby has no decimal128 MIN/MAX and falls back to sort groupby
+  if (value_type == "decimal128" and aggs == "multi") {
+    state.skip("decimal128 MIN/MAX is not hash-based");
     return;
   }
 
@@ -93,15 +99,19 @@ void nvbench_direct_groupby(nvbench::state& state)
                    keys->mutable_view().end<std::uint32_t>(),
                    dense_key_fn{num_distinct, stride});
 
+  auto const value_type_id =
+    value_type == "decimal128" ? cudf::type_id::DECIMAL128 : cudf::type_id::FLOAT64;
   data_profile profile = data_profile_builder().cardinality(0).distribution(
     cudf::type_id::FLOAT64, distribution_id::UNIFORM, 0, 1000);
+  profile.set_distribution_params(
+    cudf::type_id::DECIMAL128, distribution_id::UNIFORM, 0, 100'000, numeric::scale_type{-2});
   if (null_pct > 0) {
     profile.set_null_probability(null_pct / 100.0);
   } else {
     profile.set_null_probability(std::nullopt);
   }
-  auto const v0 = create_random_column(cudf::type_id::FLOAT64, row_count{num_rows}, profile);
-  auto const v1 = create_random_column(cudf::type_id::FLOAT64, row_count{num_rows}, profile);
+  auto const v0 = create_random_column(value_type_id, row_count{num_rows}, profile);
+  auto const v1 = create_random_column(value_type_id, row_count{num_rows}, profile);
 
   auto const requests  = make_requests(aggs, v0->view(), v1->view());
   auto const keys_view = keys->view();
@@ -150,6 +160,7 @@ NVBENCH_BENCH(nvbench_direct_groupby)
   .set_name("direct_groupby")
   .add_string_axis("algorithm", {"hash", "direct", "direct_shmem", "direct_global"})
   .add_string_axis("aggs", {"sum", "multi"})
+  .add_string_axis("value_type", {"float64", "decimal128"})
   .add_int64_axis("num_rows", {10'000'000, 100'000'000})
   .add_int64_axis("capacity", {4, 64, 1'024, 16'384, 262'144, 4'194'304, 67'108'864})
   .add_int64_axis("occupancy_pct", {100, 10})

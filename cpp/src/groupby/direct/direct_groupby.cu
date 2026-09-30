@@ -145,9 +145,43 @@ __device__ auto dispatch_shared_memory_type_and_aggregation(cudf::data_type type
                                                             cuda::std::forward<Ts>(args)...);
 }
 
-// Each block accumulates `replicas` private copies of every slot in shared memory, then merges them
-// into the global slots. Threads are spread across replicas to reduce same-address contention when
-// the capacity is small.
+// Combines replicas `1..replicas-1` of a shared memory slot into replica 0
+struct fold_replicas_fn {
+  template <typename Source, cudf::aggregation::Kind k>
+  __device__ void operator()(cuda::std::byte* target,
+                             bool* target_mask,
+                             size_type slot,
+                             size_type capacity,
+                             size_type replicas) const
+  {
+    using Target = cudf::detail::target_type_t<Source, k>;
+    if constexpr (cuda::std::is_void_v<Target>) {
+      CUDF_UNREACHABLE("Invalid source type and aggregation combination.");
+    } else {
+      using DeviceTarget = cudf::device_storage_type_t<Target>;
+      auto* const values = reinterpret_cast<DeviceTarget*>(target);
+      auto acc           = values[slot];
+      auto valid         = target_mask[slot];
+      for (size_type r = 1; r < replicas; ++r) {
+        auto const idx = slot + r * capacity;
+        valid          = valid or target_mask[idx];
+        if constexpr (k == cudf::aggregation::MIN) {
+          acc = values[idx] < acc ? values[idx] : acc;
+        } else if constexpr (k == cudf::aggregation::MAX) {
+          acc = acc < values[idx] ? values[idx] : acc;
+        } else {
+          acc = acc + values[idx];
+        }
+      }
+      values[slot]      = acc;
+      target_mask[slot] = valid;
+    }
+  }
+};
+
+// Each block accumulates `replicas` private copies of every slot in shared memory, folds them
+// together, then merges the result into the global slots. Threads are spread across replicas to
+// reduce same-address contention when the capacity is small.
 CUDF_KERNEL void __launch_bounds__(DIRECT_BLOCK_SIZE)
   direct_shmem_aggs_kernel(std::uint32_t const* keys,
                            size_type num_rows,
@@ -201,22 +235,27 @@ CUDF_KERNEL void __launch_bounds__(DIRECT_BLOCK_SIZE)
   }
   __syncthreads();
 
-  for (size_type idx = threadIdx.x; idx < num_slots; idx += blockDim.x) {
-    auto const key = idx % capacity;
+  for (size_type key = threadIdx.x; key < capacity; key += blockDim.x) {
+    if (not shmem_occupy[key]) { continue; }
     for (size_type col = 0; col < num_cols; ++col) {
-      dispatch_shared_memory_type_and_aggregation(input_values.column(col).type(),
+      auto const type   = input_values.column(col).type();
+      auto* const res   = shmem + res_offsets[col];
+      auto* const mask  = reinterpret_cast<bool*>(shmem + mask_offsets[col]);
+      if (replicas > 1) {
+        dispatch_shared_memory_type_and_aggregation(
+          type, agg_kinds[col], fold_replicas_fn{}, res, mask, key, capacity, replicas);
+      }
+      dispatch_shared_memory_type_and_aggregation(type,
                                                   agg_kinds[col],
                                                   gmem_element_aggregator{},
                                                   output_values.column(col),
                                                   key,
                                                   input_values.column(col),
-                                                  shmem + res_offsets[col],
-                                                  reinterpret_cast<bool*>(shmem + mask_offsets[col]),
-                                                  idx);
+                                                  res,
+                                                  mask,
+                                                  key);
     }
-  }
-  for (size_type idx = threadIdx.x; idx < capacity; idx += blockDim.x) {
-    if (shmem_occupy[idx] and not occupied[idx]) { occupied[idx] = true; }
+    if (not occupied[key]) { occupied[key] = true; }
   }
 }
 
@@ -447,7 +486,7 @@ std::pair<std::unique_ptr<column>, std::vector<aggregation_result>> direct_aggre
     }
     // Merging the per-block slots costs one global update per slot per block, so only use shared
     // memory when that is small relative to the input
-    auto const flush_updates = static_cast<int64_t>(grid_size) * plan.replicas * num_slots;
+    auto const flush_updates = static_cast<int64_t>(grid_size) * num_slots;
     if (grid_size == 0 or flush_updates > num_rows) { return {shmem_plan{}, 0}; }
     return {std::move(plan), grid_size};
   }();
