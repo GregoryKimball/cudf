@@ -279,6 +279,7 @@ enum class pack_compression {
   cascaded,   ///< nvCOMP Cascaded
   zstd,       ///< Zstd
   snappy,     ///< Snappy
+  lto,        ///< Caller codec registered with `cudf::experimental::lto::register_codec`
 };
 
 /**
@@ -316,6 +317,7 @@ struct pack_region_options {
   int cascaded_num_RLEs{2};            ///< Cascaded run-length encoding passes
   int cascaded_num_deltas{1};          ///< Cascaded delta encoding passes
   bool cascaded_use_bitpacking{true};  ///< Whether Cascaded applies bit-packing
+  uint32_t lto_codec_id{0};            ///< Registered codec id when `codec` is `lto`
 };
 
 /**
@@ -346,6 +348,7 @@ struct pack_options {
   int cascaded_num_RLEs{2};                          ///< Cascaded run-length encoding passes
   int cascaded_num_deltas{1};                        ///< Cascaded delta encoding passes
   bool cascaded_use_bitpacking{true};                ///< Whether Cascaded applies bit-packing
+  uint32_t lto_codec_id{0};  ///< Registered codec id when `compression` is `lto`
   /// Device memory `pack_into()` uses to stage host output and to compact compressed output
   std::size_t staging_buffer_bytes{128 * 1024 * 1024};
 };

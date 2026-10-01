@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "copying/packed_chunks.hpp"
 #include "io/comp/compression.hpp"
 #include "io/comp/nvcomp_adapter.cuh"
+#include "lto/codec.hpp"
 
 #include <cudf/column/column_device_view.cuh>
 #include <cudf/column/column_view.hpp>
@@ -24,6 +26,7 @@
 #include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/io/detail/codec.hpp>
 #include <cudf/lists/lists_column_view.hpp>
+#include <cudf/lto/udf.hpp>
 #include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/bit.hpp>
@@ -2443,7 +2446,16 @@ using cudf::io::detail::codec_status;
 bool is_concrete_codec(pack_compression compression)
 {
   return compression == pack_compression::none || compression == pack_compression::cascaded ||
-         compression == pack_compression::zstd || compression == pack_compression::snappy;
+         compression == pack_compression::zstd || compression == pack_compression::snappy ||
+         compression == pack_compression::lto;
+}
+
+/// Width of one value an LTO codec sees in a region.
+uint32_t lto_element_bytes(type_id type, bool is_validity)
+{
+  if (is_validity) { return sizeof(bitmask_type); }
+  auto const dtype = data_type{type};
+  return is_fixed_width(dtype) ? static_cast<uint32_t>(size_of(dtype)) : 1U;
 }
 
 cudf::io::compression_type to_io_compression(pack_compression compression)
@@ -2537,7 +2549,7 @@ bool same_cascaded_options(nvcompBatchedCascadedCompressOpts_t const& lhs,
  *
  * Zstd and Snappy go through the cuIO codec API. Cascaded uses the nvCOMP batched API directly
  * because cuIO does not provide it; its options are per call, so each distinct set of Cascaded
- * options is its own batch.
+ * options is its own batch. An LTO codec batch shares one codec id and value width.
  */
 struct chunk_batch {
   pack_compression codec;
@@ -2546,11 +2558,17 @@ struct chunk_batch {
   std::size_t chunk_end;
   std::size_t max_chunk_bytes;
   std::size_t total_bytes;
+  uint32_t lto_codec_id;
+  uint32_t lto_element_bytes;
 };
+
+/// Bounded so that chunk sizes fit the 32-bit sizes of the LTO codec ABI.
+constexpr std::size_t max_lto_chunk_bytes = std::size_t{16} << 20;
 
 std::size_t max_allowed_chunk_bytes(pack_compression codec)
 {
   if (codec == pack_compression::cascaded) { return nvcompCascadedCompressionMaxAllowedChunkSize; }
+  if (codec == pack_compression::lto) { return max_lto_chunk_bytes; }
   return cudf::io::detail::compress_max_allowed_chunk_size(to_io_compression(codec))
     .value_or(std::numeric_limits<std::size_t>::max());
 }
@@ -2558,12 +2576,16 @@ std::size_t max_allowed_chunk_bytes(pack_compression codec)
 std::size_t chunk_alignment(pack_compression codec)
 {
   if (codec == pack_compression::cascaded) { return nvcompCascadedRequiredCompressionAlignment; }
+  if (codec == pack_compression::lto) { return lto::detail::chunk_alignment; }
   return std::max(sizeof(uint64_t),
                   cudf::io::detail::compress_required_chunk_alignment(to_io_compression(codec)));
 }
 
 std::size_t max_compressed_chunk_bytes(chunk_batch const& batch)
 {
+  if (batch.codec == pack_compression::lto) {
+    return lto::detail::max_encoded_bytes(batch.lto_codec_id, batch.max_chunk_bytes);
+  }
   if (batch.codec != pack_compression::cascaded) {
     return cudf::io::detail::max_compressed_size(to_io_compression(batch.codec),
                                                  batch.max_chunk_bytes);
@@ -2602,6 +2624,10 @@ void compress_batch(chunk_batch const& batch,
                     cuda::stream_ref stream)
 {
   if (batch.codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
+  if (batch.codec == pack_compression::lto) {
+    return lto::detail::encode_chunks(
+      batch.lto_codec_id, batch.lto_element_bytes, inputs, outputs, results, stream);
+  }
   if (batch.codec != pack_compression::cascaded) {
     return cudf::io::detail::compress(
       to_io_compression(batch.codec), inputs, outputs, results, stream);
@@ -2625,6 +2651,8 @@ void compress_batch(chunk_batch const& batch,
 }
 
 void decompress_batch(pack_compression codec,
+                      uint32_t lto_codec_id,
+                      uint32_t lto_element_bytes,
                       device_span<device_span<uint8_t const> const> inputs,
                       device_span<device_span<uint8_t> const> outputs,
                       device_span<codec_exec_result> results,
@@ -2633,6 +2661,10 @@ void decompress_batch(pack_compression codec,
                       cuda::stream_ref stream)
 {
   if (codec == pack_compression::none) { return copy_chunks(inputs, outputs, stream); }
+  if (codec == pack_compression::lto) {
+    return lto::detail::decode_chunks(
+      lto_codec_id, lto_element_bytes, inputs, outputs, results, stream);
+  }
   if (codec != pack_compression::cascaded) {
     return cudf::io::detail::decompress(
       to_io_compression(codec), inputs, outputs, results, max_chunk_bytes, total_bytes, stream);
@@ -2659,6 +2691,8 @@ void decompress_batch(pack_compression codec,
 struct decompression_work {
   pack_compression codec;
   nvcompType_t cascaded_type;
+  uint32_t lto_codec_id;
+  uint32_t lto_element_bytes;
   std::vector<device_span<uint8_t const>> inputs;
   std::vector<device_span<uint8_t>> outputs;
   std::size_t max_chunk_bytes = 0;
@@ -2689,8 +2723,8 @@ struct compressed_metadata_entry {
   uint64_t num_chunks;
   int32_t type;
   uint32_t is_validity;
-  int32_t compression;  ///< `none` when every chunk of the region is stored raw
-  uint32_t reserved;
+  int32_t compression;    ///< `none` when every chunk of the region is stored raw
+  uint32_t lto_codec_id;  ///< Registered codec when `compression` is `lto`, otherwise zero
 };
 
 constexpr uint64_t compressed_metadata_magic   = 0x4355444650524547ULL;  // "CUDFPREG"
@@ -2707,6 +2741,7 @@ struct prepared_compression_region {
   std::size_t chunk_begin;
   std::size_t num_chunks;
   std::size_t alignment;  ///< Alignment of compressed chunks in the payload
+  uint32_t lto_codec_id;  ///< Registered codec when `compression` is `lto`
 };
 
 struct chunk_descriptor {
@@ -2741,7 +2776,7 @@ compressed_metadata_entry make_entry(prepared_compression_region const& region,
           static_cast<int32_t>(region.layout.type),
           region.layout.kind == pack_region_kind::validity ? 1U : 0U,
           static_cast<int32_t>(compression),
-          0U};
+          compression == pack_compression::lto ? region.lto_codec_id : 0U};
 }
 
 template <typename T>
@@ -2955,11 +2990,12 @@ pack_region_options inherit_region_options(pack_options const& options)
                              options.automatic_min_savings_bytes,
                              options.cascaded_num_RLEs,
                              options.cascaded_num_deltas,
-                             options.cascaded_use_bitpacking};
+                             options.cascaded_use_bitpacking,
+                             options.lto_codec_id};
 }
 
 struct plan_input {
-  std::unique_ptr<detail::contiguous_split_state> state;
+  std::unique_ptr<cudf::detail::contiguous_split_state> state;
   std::vector<uint8_t> metadata;
   cudf::device_span<uint8_t const> packed_source;  ///< Borrowed allocation of packed_columns input
 };
@@ -2972,7 +3008,7 @@ plan_input make_plan_input(cudf::table_view const& input,
   // output allocation while preserving the already-computed source buffers, destination offsets,
   // batching, and metadata state for pack_into().
   auto state =
-    std::make_unique<detail::contiguous_split_state>(input, 0, stream, std::nullopt, temp_mr);
+    std::make_unique<cudf::detail::contiguous_split_state>(input, 0, stream, std::nullopt, temp_mr);
   auto metadata = state->build_packed_column_metadata();
   return {std::move(state), metadata == nullptr ? std::vector<uint8_t>{} : std::move(*metadata)};
 }
@@ -2983,7 +3019,7 @@ plan_input make_plan_input(cudf::packed_columns const& input,
 {
   CUDF_EXPECTS(input.metadata != nullptr && input.gpu_data != nullptr,
                "Packed input must contain metadata and a device allocation");
-  auto state = std::make_unique<detail::contiguous_split_state>(
+  auto state = std::make_unique<cudf::detail::contiguous_split_state>(
     cudf::unpack(input), 0, stream, std::nullopt, temp_mr);
   CUDF_EXPECTS(state->get_total_contiguous_size() == input.gpu_data->size(),
                "Packed metadata does not describe the complete device allocation");
@@ -3082,8 +3118,14 @@ prepared_pack_components make_prepared_pack_components(
 
       auto chunk_bytes      = raw_chunk_bytes;
       auto cascaded_options = nvcompBatchedCascadedCompressDefaultOpts;
+      if (requested == pack_compression::lto) {
+        CUDF_EXPECTS(lto::is_codec_registered(region_options.lto_codec_id),
+                     "The selected LTO codec is not registered",
+                     std::invalid_argument);
+      }
       if (requested != pack_compression::none) {
         CUDF_EXPECTS(requested == pack_compression::cascaded ||
+                       requested == pack_compression::lto ||
                        cudf::io::detail::is_compression_supported(to_io_compression(requested)),
                      "The selected compression codec is disabled");
         CUDF_EXPECTS(region_options.compression_chunk_bytes > 0,
@@ -3108,7 +3150,8 @@ prepared_pack_components make_prepared_pack_components(
         chunk_bytes,
         0,
         cudf::util::div_rounding_up_safe(layout.data_bytes, chunk_bytes),
-        sizeof(uint64_t)});
+        sizeof(uint64_t),
+        requested == pack_compression::lto ? region_options.lto_codec_id : 0U});
     }
     CUDF_EXPECTS(uncompressed_end == uncompressed_bytes,
                  "Prepared compression regions do not cover the complete payload");
@@ -3118,14 +3161,27 @@ prepared_pack_components make_prepared_pack_components(
     std::size_t num_chunks = 0;
     for (std::size_t first = 0; first < regions.size(); ++first) {
       if (region_batch[first] != std::numeric_limits<std::size_t>::max()) { continue; }
-      chunk_batch batch{
-        regions[first].compression, regions[first].cascaded_options, num_chunks, 0, 0, 0};
+      auto const element_bytes = [&](std::size_t i) {
+        return lto_element_bytes(regions[i].layout.type,
+                                 regions[i].layout.kind == pack_region_kind::validity);
+      };
+      chunk_batch batch{regions[first].compression,
+                        regions[first].cascaded_options,
+                        num_chunks,
+                        0,
+                        0,
+                        0,
+                        regions[first].lto_codec_id,
+                        element_bytes(first)};
       for (std::size_t i = first; i < regions.size(); ++i) {
         if (region_batch[i] != std::numeric_limits<std::size_t>::max() ||
             regions[i].compression != regions[first].compression ||
             (regions[i].compression == pack_compression::cascaded &&
              !same_cascaded_options(regions[i].cascaded_options,
-                                    regions[first].cascaded_options))) {
+                                    regions[first].cascaded_options)) ||
+            (regions[i].compression == pack_compression::lto &&
+             (regions[i].lto_codec_id != batch.lto_codec_id ||
+              element_bytes(i) != batch.lto_element_bytes))) {
           continue;
         }
         region_batch[i]        = result.batches.size();
@@ -3569,8 +3625,12 @@ std::unique_ptr<table> materialize(packed_data_view input,
       "Packed payload codec does not match its declared representation");
     CUDF_EXPECTS(compression == pack_compression::none ||
                    compression == pack_compression::cascaded ||
+                   compression == pack_compression::lto ||
                    cudf::io::detail::is_decompression_supported(to_io_compression(compression)),
                  "The packed payload codec is disabled");
+    CUDF_EXPECTS(
+      compression != pack_compression::lto || lto::is_codec_registered(entry.lto_codec_id),
+      "The packed payload's LTO codec is not registered");
     CUDF_EXPECTS(
       entry.data_bytes <= entry.uncompressed_bytes &&
         (entry.data_bytes == 0 || entry.chunk_bytes > 0) &&
@@ -3589,12 +3649,17 @@ std::unique_ptr<table> materialize(packed_data_view input,
     stream);
 
   std::vector<decompression_work> work;
-  auto const work_for = [&](pack_compression codec, nvcompType_t cascaded_type) -> auto& {
+  auto const work_for = [&](pack_compression codec,
+                            nvcompType_t cascaded_type,
+                            uint32_t lto_codec_id,
+                            uint32_t lto_bytes) -> auto& {
     auto iter = std::find_if(work.begin(), work.end(), [&](auto const& item) {
-      return item.codec == codec && item.cascaded_type == cascaded_type;
+      return item.codec == codec && item.cascaded_type == cascaded_type &&
+             item.lto_codec_id == lto_codec_id && item.lto_element_bytes == lto_bytes;
     });
     if (iter == work.end()) {
-      iter = work.insert(work.end(), decompression_work{codec, cascaded_type});
+      iter =
+        work.insert(work.end(), decompression_work{codec, cascaded_type, lto_codec_id, lto_bytes});
     }
     return *iter;
   };
@@ -3604,6 +3669,10 @@ std::unique_ptr<table> materialize(packed_data_view input,
       compression == pack_compression::cascaded
         ? cascaded_type(static_cast<type_id>(entry.type), entry.is_validity != 0, entry.data_bytes)
         : NVCOMP_TYPE_UCHAR;
+    auto const is_lto       = compression == pack_compression::lto;
+    auto const lto_codec_id = is_lto ? entry.lto_codec_id : 0U;
+    auto const lto_bytes =
+      is_lto ? lto_element_bytes(static_cast<type_id>(entry.type), entry.is_validity != 0) : 0U;
     auto* const output = static_cast<uint8_t*>(destination);
     for (std::size_t k = 0; k < entry.num_chunks; ++k) {
       auto const c        = entry.chunk_begin + k;
@@ -3614,8 +3683,8 @@ std::unique_ptr<table> materialize(packed_data_view input,
       CUDF_EXPECTS((raw ? bytes == expected : compression != pack_compression::none && bytes > 0) &&
                      payload_contains(parsed.chunk_offsets[c], bytes),
                    "Compressed chunk is missing or truncated");
-      auto& codec =
-        raw ? work_for(pack_compression::none, NVCOMP_TYPE_UCHAR) : work_for(compression, cascaded);
+      auto& codec = raw ? work_for(pack_compression::none, NVCOMP_TYPE_UCHAR, 0U, 0U)
+                        : work_for(compression, cascaded, lto_codec_id, lto_bytes);
       codec.inputs.emplace_back(input.payload.data() + parsed.chunk_offsets[c], bytes);
       codec.outputs.emplace_back(output + offset, expected);
       codec.max_chunk_bytes = std::max(codec.max_chunk_bytes, expected);
@@ -3658,6 +3727,8 @@ std::unique_ptr<table> materialize(packed_data_view input,
                  codec_results.end(),
                  codec_exec_result{0, codec_status::FAILURE});
     decompress_batch(codec.codec,
+                     codec.lto_codec_id,
+                     codec.lto_element_bytes,
                      d_inputs,
                      d_outputs,
                      codec_results,
@@ -3676,6 +3747,59 @@ std::unique_ptr<table> materialize(packed_data_view input,
   }
   return std::make_unique<table>(std::move(columns));
 }
+
+namespace detail {
+
+packed_column_chunks read_packed_column_chunks(packed_data_view input, cuda::stream_ref stream)
+{
+  CUDF_EXPECTS(input.compression != pack_compression::none,
+               "An uncompressed payload has no chunk directory",
+               std::invalid_argument);
+  auto const parsed   = parse_compressed_metadata(input.metadata);
+  auto const metadata = packed_metadata_view{parsed.legacy_metadata};
+  CUDF_EXPECTS(metadata.num_columns() == 1, "Expected one packed column", std::invalid_argument);
+  auto const column = metadata.column(0);
+  CUDF_EXPECTS(is_fixed_width(column.type()) && column.num_children() == 0 &&
+                 column.null_mask_offset() == -1 && column.data_offset() >= 0,
+               "Expected a non-nullable fixed-width column",
+               std::invalid_argument);
+  auto const entry = std::find_if(parsed.entries.begin(), parsed.entries.end(), [&](auto const& e) {
+    return e.is_validity == 0 &&
+           e.uncompressed_offset == static_cast<uint64_t>(column.data_offset());
+  });
+  CUDF_EXPECTS(entry != parsed.entries.end(), "Packed column has no data region");
+  auto const compression = static_cast<pack_compression>(entry->compression);
+  CUDF_EXPECTS(compression != pack_compression::none,
+               "The packed column's data is stored uncompressed",
+               std::invalid_argument);
+
+  auto const num_chunks = parsed.chunk_offsets.size();
+  auto const all_sizes  = cudf::detail::make_std_vector(
+    device_span<uint64_t const>{reinterpret_cast<uint64_t const*>(input.payload.data()),
+                                 num_chunks},
+    stream);
+  packed_column_chunks result{column.type(),
+                              column.num_rows(),
+                              compression,
+                              entry->lto_codec_id,
+                              static_cast<std::size_t>(entry->chunk_bytes),
+                              static_cast<std::size_t>(entry->data_bytes),
+                              {},
+                              {}};
+  result.offsets.reserve(entry->num_chunks);
+  result.sizes.reserve(entry->num_chunks);
+  for (std::size_t k = 0; k < entry->num_chunks; ++k) {
+    auto const c = entry->chunk_begin + k;
+    CUDF_EXPECTS((all_sizes[c] & raw_chunk_flag) == 0 && all_sizes[c] > 0,
+                 "The packed column has a raw or missing chunk",
+                 std::invalid_argument);
+    result.offsets.push_back(parsed.chunk_offsets[c]);
+    result.sizes.push_back(all_sizes[c]);
+  }
+  return result;
+}
+
+}  // namespace detail
 
 }  // namespace experimental
 
