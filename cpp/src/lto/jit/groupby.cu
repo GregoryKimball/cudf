@@ -8,7 +8,7 @@
 using cudf_lto_kernel::copy_state;
 
 namespace {
-constexpr unsigned int warps_per_block = CUDF_LTO_REDUCE_BLOCK_SIZE / 32;
+constexpr unsigned int warps_per_block = CUDF_LTO_BLOCK_SIZE / 32;
 }
 
 // Direct groupby into dense slots. Each warp owns one shared-memory state per slot. After every
@@ -17,7 +17,7 @@ constexpr unsigned int warps_per_block = CUDF_LTO_REDUCE_BLOCK_SIZE / 32;
 // atomics are needed. Warp slots merge per block, and the last block merges across the grid.
 //
 // Dynamic shared memory: [staged tile][warp slot states][one row state per thread].
-extern "C" __global__ void __launch_bounds__(CUDF_LTO_REDUCE_BLOCK_SIZE)
+extern "C" __global__ void __launch_bounds__(CUDF_LTO_BLOCK_SIZE)
   cudf_kernel_entry(cudf_lto_reduce_args const args)
 {
   extern __shared__ uint4 dynamic_smem[];
@@ -27,7 +27,7 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_REDUCE_BLOCK_SIZE)
 
   auto const state_bytes  = args.state_bytes;
   auto const num_groups   = args.num_groups;
-  auto* const warp_states = smem + args.tile_bytes;
+  auto* const warp_states = smem + args.source.tile_bytes;
   auto* const row_states  = warp_states + warps_per_block * num_groups * state_bytes;
   auto const lane         = threadIdx.x % 32;
   auto const warp         = threadIdx.x / 32;
@@ -37,8 +37,8 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_REDUCE_BLOCK_SIZE)
     cudf_lto_reduce_init(warp_states + i * state_bytes);
   }
 
-  for (cudf_lto_u64 t = blockIdx.x; t < args.num_tiles; t += gridDim.x) {
-    cudf_lto_kernel::load_tile(args, t, smem, tile);
+  for (cudf_lto_u64 t = blockIdx.x; t < args.source.num_tiles; t += gridDim.x) {
+    cudf_lto_kernel::load_tile(args.source, t, smem, tile);
     __syncthreads();
     for (cudf_lto_u32 base = 0; base < tile.num_rows; base += blockDim.x) {
       auto const row    = base + threadIdx.x;

@@ -20,6 +20,7 @@
 #include <cudf_test_fragments.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -319,4 +320,87 @@ TEST_F(LTOUDFTest, LookupTableRejectsDuplicatesAndAcceptsEmpty)
   auto const empty = lto::make_lookup_table(all_null);
   EXPECT_EQ(empty.num_rows(), 0);
   EXPECT_EQ(empty.view().num_keys, 0u);
+}
+
+TEST_F(LTOUDFTest, FilteredScanEmitsKeptRows)
+{
+  std::vector<packed> keep_alive;
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions;
+  std::vector<int32_t> all_keys;
+  std::vector<int64_t> all_values;
+  for (unsigned p = 0; p < 2; ++p) {
+    auto const rows   = (p + 2) * tile_rows + 77 * p;
+    auto const keys   = random_values<int32_t>(rows, 0, 999, 30 + p);
+    auto const values = random_values<int64_t>(rows, -(int64_t{1} << 40), int64_t{1} << 40, 40 + p);
+    all_keys.insert(all_keys.end(), keys.begin(), keys.end());
+    all_values.insert(all_values.end(), values.begin(), values.end());
+    cudf::test::fixed_width_column_wrapper<int32_t> key_column(keys.begin(), keys.end());
+    cudf::test::fixed_width_column_wrapper<int64_t> value_column(values.begin(), values.end());
+    keep_alive.push_back(pack_lto(key_column));
+    keep_alive.push_back(pack_lto(value_column));
+    partitions.push_back({keep_alive[keep_alive.size() - 2].view(), keep_alive.back().view()});
+  }
+
+  auto const stream  = cudf::get_default_stream();
+  auto const source  = lto::make_packed_source(partitions, stream);
+  auto const program = lto::udf{test_fragment(cudf_test_fragments::lto_filtered_select),
+                                cudf::lto_binary_type::FATBIN};
+  std::vector<cudf::data_type> const types{cudf::data_type{cudf::type_id::INT64},
+                                           cudf::data_type{cudf::type_id::INT64},
+                                           cudf::data_type{cudf::type_id::INT32}};
+
+  auto const check =
+    [&](int64_t threshold, cudf::size_type expected_rows, std::span<bool const> lazy) {
+      std::vector<int64_t> expected_rows_kept;
+      for (std::size_t i = 0; i < all_keys.size(); ++i) {
+        if (all_keys[i] < threshold) { expected_rows_kept.push_back(static_cast<int64_t>(i)); }
+      }
+      rmm::device_buffer threshold_buffer(&threshold, sizeof(threshold), stream);
+      auto const result =
+        lto::select(source, program, types, threshold_buffer.data(), lazy, expected_rows, stream);
+      ASSERT_EQ(result->num_columns(), 3);
+      ASSERT_EQ(static_cast<std::size_t>(result->num_rows()), expected_rows_kept.size());
+      auto const n = expected_rows_kept.size();
+      std::vector<int64_t> rows(n);
+      std::vector<int64_t> values(n);
+      std::vector<int32_t> keys(n);
+      if (n > 0) {
+        ASSERT_EQ(cudaMemcpy(rows.data(),
+                             result->get_column(0).view().data<int64_t>(),
+                             n * sizeof(int64_t),
+                             cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(values.data(),
+                             result->get_column(1).view().data<int64_t>(),
+                             n * sizeof(int64_t),
+                             cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+        ASSERT_EQ(cudaMemcpy(keys.data(),
+                             result->get_column(2).view().data<int32_t>(),
+                             n * sizeof(int32_t),
+                             cudaMemcpyDeviceToHost),
+                  cudaSuccess);
+      }
+      std::vector<std::size_t> order(n);
+      std::iota(order.begin(), order.end(), std::size_t{0});
+      std::sort(order.begin(), order.end(), [&](auto a, auto b) { return rows[a] < rows[b]; });
+      for (std::size_t i = 0; i < n; ++i) {
+        auto const k   = order[i];
+        auto const row = expected_rows_kept[i];
+        ASSERT_EQ(rows[k], row);
+        EXPECT_EQ(values[k], all_values[row]);
+        EXPECT_EQ(keys[k], all_keys[row]);
+      }
+    };
+
+  std::array<bool, 2> const lazy_values{false, true};
+  check(100, 0, {});
+  check(100, 10, {});
+  check(100, 1 << 20, {});
+  check(100, 0, lazy_values);
+  check(1000, 0, {});
+  check(0, 0, {});
+
+  std::vector<cudf::data_type> const strings{cudf::data_type{cudf::type_id::STRING}};
+  EXPECT_THROW(lto::select(source, program, strings), std::invalid_argument);
 }

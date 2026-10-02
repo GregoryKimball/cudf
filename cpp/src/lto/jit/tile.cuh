@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include <lto/jit/reduce_args.h>
+#include <lto/jit/args.h>
 
 namespace cudf_lto_kernel {
 
@@ -46,25 +46,27 @@ __device__ inline void stage(cudf_lto_chunk_ref const chunk, unsigned char* dest
 }
 
 /// Block-cooperative: describes tile `t` in `tile` and stages its chunks at `smem`.
-__device__ inline void load_tile(cudf_lto_reduce_args const& args,
+__device__ inline void load_tile(cudf_lto_tile_source const& source,
                                  cudf_lto_u64 t,
                                  unsigned char* smem,
                                  cudf_lto_tile& tile)
 {
-  auto const* const chunks = args.chunks + t * args.num_columns;
-  if (threadIdx.x < args.num_columns) {
-    auto const lazy = (args.lazy_columns >> threadIdx.x) & 1U;
+  auto const* const chunks = source.chunks + t * source.num_columns;
+  if (threadIdx.x < source.num_columns) {
+    auto const lazy = (source.lazy_columns >> threadIdx.x) & 1U;
     tile.columns[threadIdx.x] =
-      lazy ? chunks[threadIdx.x].data : smem + args.column_offsets[threadIdx.x];
+      lazy ? chunks[threadIdx.x].data : smem + source.column_offsets[threadIdx.x];
     tile.column_bytes[threadIdx.x] = static_cast<cudf_lto_u32>(chunks[threadIdx.x].bytes);
   }
   if (threadIdx.x == 0) {
-    tile.first_row   = args.tiles[t].first_row;
-    tile.num_rows    = args.tiles[t].num_rows;
-    tile.num_columns = args.num_columns;
+    tile.first_row   = source.tiles[t].first_row;
+    tile.num_rows    = source.tiles[t].num_rows;
+    tile.num_columns = source.num_columns;
   }
-  for (cudf_lto_u32 c = 0; c < args.num_columns; ++c) {
-    if (((args.lazy_columns >> c) & 1U) == 0) { stage(chunks[c], smem + args.column_offsets[c]); }
+  for (cudf_lto_u32 c = 0; c < source.num_columns; ++c) {
+    if (((source.lazy_columns >> c) & 1U) == 0) {
+      stage(chunks[c], smem + source.column_offsets[c]);
+    }
   }
 }
 

@@ -8,6 +8,7 @@
 #include <cudf/column/column_view.hpp>
 #include <cudf/contiguous_split.hpp>
 #include <cudf/lto/udf_abi.h>
+#include <cudf/table/table.hpp>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -114,6 +115,14 @@ class packed_source {
                                     std::span<bool const>,
                                     cuda::stream_ref,
                                     rmm::device_async_resource_ref);
+  friend std::unique_ptr<table> select(packed_source const&,
+                                       udf,
+                                       std::span<data_type const>,
+                                       void const*,
+                                       std::span<bool const>,
+                                       size_type,
+                                       cuda::stream_ref,
+                                       rmm::device_async_resource_ref);
 };
 
 /**
@@ -184,6 +193,42 @@ rmm::device_buffer groupby(
   std::size_t state_bytes,
   void const* user_data              = nullptr,
   std::span<bool const> lazy_columns = {},
+  cuda::stream_ref stream            = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr  = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Scans `source` with a caller row program and returns only the rows it keeps, without
+ * unpacking.
+ *
+ * The kernel stages tiles like `reduce` and calls `cudf_lto_select_row` once per row. For each
+ * kept row it calls `cudf_lto_select_emit`, which writes the row's values into the output columns,
+ * typically decoded tile columns, values computed from them, or build-side values found through
+ * lookups. Reading the emitted columns lazily fetches them only for kept rows.
+ *
+ * The output columns are first sized to hold `expected_rows`. If more rows are kept, the scan
+ * runs again with exact capacity, so `expected_rows` of zero always scans twice. The order of
+ * output rows is unspecified.
+ *
+ * @throws std::invalid_argument if `output_types` is empty or not all fixed-width
+ * @throws std::overflow_error if more than `size_type` rows are kept
+ *
+ * @param source Prepared tiles
+ * @param row_program Fragment defining the `cudf_lto_select_row` and `cudf_lto_select_emit` UDFs
+ * @param output_types Type of each output column; every output is non-nullable
+ * @param user_data Device-accessible pointer passed to every row program call
+ * @param lazy_columns As for `reduce`
+ * @param expected_rows Initial capacity of the output columns
+ * @param stream Stream for the scan
+ * @param mr Device memory for the returned table
+ * @return The kept rows
+ */
+std::unique_ptr<table> select(
+  packed_source const& source,
+  udf row_program,
+  std::span<data_type const> output_types,
+  void const* user_data              = nullptr,
+  std::span<bool const> lazy_columns = {},
+  size_type expected_rows            = 0,
   cuda::stream_ref stream            = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr  = cudf::get_current_device_resource_ref());
 

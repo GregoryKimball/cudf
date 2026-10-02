@@ -168,6 +168,32 @@ __device__ cudf_lto_u32 cudf_lto_groupby_row(void const* user_data,
                                              cudf_lto_u32 row,
                                              void* row_state);
 
+/* ---- Filtered-scan hooks: one select row program defines both. --------------------------- */
+
+/**
+ * @brief Decides whether row `row` of `tile` is kept.
+ *
+ * Called once per row by one thread. It should read only the columns the decision needs, so that
+ * columns read in place are fetched for kept rows alone.
+ *
+ * @return Nonzero to keep the row
+ */
+__device__ int cudf_lto_select_row(void const* user_data,
+                                   cudf_lto_tile const* tile,
+                                   cudf_lto_u32 row);
+
+/**
+ * @brief Writes kept row `row` of `tile` as row `output_row` of every output column.
+ *
+ * Called once per kept row by one thread. `outputs[k]` is the data of output column `k`, of the
+ * fixed-width type the caller passed to the filtered scan.
+ */
+__device__ void cudf_lto_select_emit(void const* user_data,
+                                     cudf_lto_tile const* tile,
+                                     cudf_lto_u32 row,
+                                     void* const* outputs,
+                                     cudf_lto_u64 output_row);
+
 #endif /* __CUDACC__ */
 
 #ifdef __cplusplus
