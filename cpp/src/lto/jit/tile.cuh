@@ -53,7 +53,9 @@ __device__ inline void load_tile(cudf_lto_reduce_args const& args,
 {
   auto const* const chunks = args.chunks + t * args.num_columns;
   if (threadIdx.x < args.num_columns) {
-    tile.columns[threadIdx.x]      = smem + args.column_offsets[threadIdx.x];
+    auto const lazy = (args.lazy_columns >> threadIdx.x) & 1U;
+    tile.columns[threadIdx.x] =
+      lazy ? chunks[threadIdx.x].data : smem + args.column_offsets[threadIdx.x];
     tile.column_bytes[threadIdx.x] = static_cast<cudf_lto_u32>(chunks[threadIdx.x].bytes);
   }
   if (threadIdx.x == 0) {
@@ -62,7 +64,7 @@ __device__ inline void load_tile(cudf_lto_reduce_args const& args,
     tile.num_columns = args.num_columns;
   }
   for (cudf_lto_u32 c = 0; c < args.num_columns; ++c) {
-    stage(chunks[c], smem + args.column_offsets[c]);
+    if (((args.lazy_columns >> c) & 1U) == 0) { stage(chunks[c], smem + args.column_offsets[c]); }
   }
 }
 

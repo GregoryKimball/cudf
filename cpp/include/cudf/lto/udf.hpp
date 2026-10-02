@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <cudf/column/column_view.hpp>
 #include <cudf/contiguous_split.hpp>
+#include <cudf/lto/udf_abi.h>
 #include <cudf/transform.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -101,6 +103,7 @@ class packed_source {
                                    udf,
                                    std::size_t,
                                    void const*,
+                                   std::span<bool const>,
                                    cuda::stream_ref,
                                    rmm::device_async_resource_ref);
   friend rmm::device_buffer groupby(packed_source const&,
@@ -108,6 +111,7 @@ class packed_source {
                                     std::size_t,
                                     std::size_t,
                                     void const*,
+                                    std::span<bool const>,
                                     cuda::stream_ref,
                                     rmm::device_async_resource_ref);
 };
@@ -138,6 +142,8 @@ packed_source make_packed_source(
  * @param row_program Fragment defining the `cudf_lto_reduce_init`, `_row`, and `_merge` UDFs
  * @param state_bytes Size of the reduction state, at most `CUDF_LTO_MAX_STATE_BYTES`
  * @param user_data Device-accessible pointer passed to every `cudf_lto_reduce_row` call
+ * @param lazy_columns Per column, whether the row program reads its chunks in place instead of from
+ * shared memory; empty stages every column
  * @param stream Stream for the reduction
  * @param mr Device memory for the returned state
  * @return The final `state_bytes` state in device memory
@@ -146,9 +152,10 @@ rmm::device_buffer reduce(
   packed_source const& source,
   udf row_program,
   std::size_t state_bytes,
-  void const* user_data             = nullptr,
-  cuda::stream_ref stream           = cudf::get_default_stream(),
-  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+  void const* user_data              = nullptr,
+  std::span<bool const> lazy_columns = {},
+  cuda::stream_ref stream            = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr  = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Groups every row of `source` into `num_groups` dense slots with a caller row program,
@@ -165,6 +172,7 @@ rmm::device_buffer reduce(
  * @param num_groups Number of dense group slots
  * @param state_bytes Size of one slot's state, at most `CUDF_LTO_MAX_STATE_BYTES`
  * @param user_data Device-accessible pointer passed to every `cudf_lto_groupby_row` call
+ * @param lazy_columns As for `reduce`
  * @param stream Stream for the groupby
  * @param mr Device memory for the returned states
  * @return `num_groups` states of `state_bytes` each, in slot order, in device memory
@@ -174,7 +182,54 @@ rmm::device_buffer groupby(
   udf row_program,
   std::size_t num_groups,
   std::size_t state_bytes,
-  void const* user_data             = nullptr,
+  void const* user_data              = nullptr,
+  std::span<bool const> lazy_columns = {},
+  cuda::stream_ref stream            = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr  = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Dense map from unique integer build keys to build rows, for row programs.
+ *
+ * Owns the device memory behind a `cudf_lto_lookup`; a caller copies `view()` into its row
+ * program's `user_data` and calls `cudf_lto_lookup_find`.
+ */
+class lookup_table {
+ public:
+  /**
+   * @brief Takes ownership of the buffers `view` points into; made by `make_lookup_table`.
+   *
+   * @param storage Device buffers backing `view`
+   * @param view The device view
+   * @param num_rows Build rows the lookup indexes
+   */
+  lookup_table(std::vector<rmm::device_buffer> storage, cudf_lto_lookup view, size_type num_rows);
+
+  [[nodiscard]] cudf_lto_lookup const& view() const { return _view; }  ///< @return Device view
+  [[nodiscard]] size_type num_rows() const { return _num_rows; }  ///< @return Indexed build rows
+
+ private:
+  std::vector<rmm::device_buffer> _storage;
+  cudf_lto_lookup _view;
+  size_type _num_rows;
+};
+
+/**
+ * @brief Builds a dense lookup over `keys`: a bitmap of the key range with per-word ranks, and
+ * the row of each key in key order.
+ *
+ * Null keys are skipped and never found. Memory is about `(max - min) / 6` bytes plus four bytes
+ * per row, and a lookup is two dependent loads.
+ *
+ * @throws std::invalid_argument if `keys` is not INT8, INT16, INT32, or INT64, if the valid keys
+ * are not unique, or if their range exceeds 2^37
+ *
+ * @param keys Build keys
+ * @param stream Stream for building
+ * @param mr Device memory for the lookup
+ * @return The lookup
+ */
+lookup_table make_lookup_table(
+  column_view const& keys,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

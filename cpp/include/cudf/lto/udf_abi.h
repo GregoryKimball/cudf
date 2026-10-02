@@ -31,6 +31,8 @@
 #define CUDF_LTO_CHUNK_ALIGNMENT 16
 /// Slot a groupby row program returns for a row it drops.
 #define CUDF_LTO_SKIP_ROW 0xffffffffU
+/// Row `cudf_lto_lookup_find` returns for an absent key.
+#define CUDF_LTO_NOT_FOUND 0xffffffffU
 
 typedef unsigned int cudf_lto_u32;
 typedef unsigned long long cudf_lto_u64;
@@ -55,8 +57,10 @@ typedef struct cudf_lto_codec_job {
 /**
  * @brief One row-aligned tile of a reduction: the same rows of every consumed column.
  *
- * `columns[c]` points to column `c`'s encoded chunk staged in shared memory, aligned to
- * `CUDF_LTO_CHUNK_ALIGNMENT`. Its bytes are exactly what the column's codec wrote for this chunk.
+ * `columns[c]` points to column `c`'s encoded chunk, aligned to `CUDF_LTO_CHUNK_ALIGNMENT`: staged
+ * in shared memory, or for a column the caller marked lazy, in place in the packed payload (device
+ * or mapped host memory), so only the bytes the row program reads are fetched. Its bytes are
+ * exactly what the column's codec wrote for this chunk.
  */
 typedef struct cudf_lto_tile {
   cudf_lto_u64 first_row;  ///< Row of the whole input that is row 0 of this tile
@@ -66,7 +70,34 @@ typedef struct cudf_lto_tile {
   cudf_lto_u32 column_bytes[CUDF_LTO_MAX_COLUMNS];
 } cudf_lto_tile;
 
+/**
+ * @brief Dense map from unique integer build keys to build rows, made by `lto::make_lookup_table`.
+ *
+ * Bit `k` of `bits` is set when key `min_key + k` is present, `ranks[w]` counts the set bits
+ * before word `w`, and `rows` holds the build row of each present key in key order. All pointers
+ * are device memory. A row program reaches a lookup through its `user_data`.
+ */
+typedef struct cudf_lto_lookup {
+  cudf_lto_u64 const* bits;
+  cudf_lto_u32 const* ranks;
+  cudf_lto_u32 const* rows;
+  long long min_key;
+  cudf_lto_u64 num_keys;  ///< Width of the key range; zero when the build side is empty
+} cudf_lto_lookup;
+
 #ifdef __CUDACC__
+
+/// The build row holding `key`, or `CUDF_LTO_NOT_FOUND`.
+static __device__ __forceinline__ cudf_lto_u32 cudf_lto_lookup_find(cudf_lto_lookup const* lookup,
+                                                                    long long key)
+{
+  cudf_lto_u64 const k = (cudf_lto_u64)key - (cudf_lto_u64)lookup->min_key;
+  if (k >= lookup->num_keys) { return CUDF_LTO_NOT_FOUND; }
+  cudf_lto_u64 const word = lookup->bits[k >> 6];
+  cudf_lto_u64 const bit  = 1ULL << (k & 63);
+  if ((word & bit) == 0) { return CUDF_LTO_NOT_FOUND; }
+  return lookup->rows[lookup->ranks[k >> 6] + (cudf_lto_u32)__popcll(word & (bit - 1))];
+}
 
 /* ---- Codec hooks: one codec fragment defines both. --------------------------------------- */
 

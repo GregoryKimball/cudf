@@ -721,6 +721,7 @@ add_fragment(cudf_test_fragments FRAGMENT lto_for_bitpack SOURCE lto/fragments/f
 
 add_fragment(cudf_test_fragments FRAGMENT lto_filtered_sum SOURCE lto/fragments/filtered_sum.cu)
 add_fragment(cudf_test_fragments FRAGMENT lto_grouped_sum SOURCE lto/fragments/grouped_sum.cu)
+add_fragment(cudf_test_fragments FRAGMENT lto_lookup_sum SOURCE lto/fragments/lookup_sum.cu)
 
 rtcx_embed(
   cudf_test_fragments COMPRESSION none OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/rtcx_embed"

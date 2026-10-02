@@ -19,6 +19,7 @@
 
 #include <cudf_test_fragments.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -171,7 +172,7 @@ TEST_F(LTOUDFTest, FilteredSumOverPartitions)
     lto::udf{test_fragment(cudf_test_fragments::lto_filtered_sum), cudf::lto_binary_type::FATBIN};
   for (int run = 0; run < 2; ++run) {
     auto const state =
-      lto::reduce(source, program, 2 * sizeof(int64_t), threshold_buffer.data(), stream);
+      lto::reduce(source, program, 2 * sizeof(int64_t), threshold_buffer.data(), {}, stream);
     int64_t result[2];
     ASSERT_EQ(cudaMemcpy(result, state.data(), sizeof(result), cudaMemcpyDeviceToHost),
               cudaSuccess);
@@ -221,7 +222,7 @@ TEST_F(LTOUDFTest, GroupedSumOverDictionaryCodes)
     lto::udf{test_fragment(cudf_test_fragments::lto_grouped_sum), cudf::lto_binary_type::FATBIN};
   for (int run = 0; run < 2; ++run) {
     auto const states =
-      lto::groupby(source, program, keys.size(), 2 * sizeof(int64_t), nullptr, stream);
+      lto::groupby(source, program, keys.size(), 2 * sizeof(int64_t), nullptr, {}, stream);
     std::vector<int64_t> result(2 * keys.size());
     ASSERT_EQ(cudaMemcpy(result.data(), states.data(), states.size(), cudaMemcpyDeviceToHost),
               cudaSuccess);
@@ -230,4 +231,92 @@ TEST_F(LTOUDFTest, GroupedSumOverDictionaryCodes)
       EXPECT_EQ(result[2 * g + 1], expected_count[g]);
     }
   }
+}
+
+TEST_F(LTOUDFTest, LookupJoinGroupbyWithLazyColumn)
+{
+  // Build side: even keys in [-5000, 20000) in shuffled order, plus a null key.
+  std::vector<int64_t> build_keys;
+  for (int64_t k = -5000; k < 20000; k += 2) {
+    build_keys.push_back(k);
+  }
+  std::shuffle(build_keys.begin(), build_keys.end(), std::mt19937{7});
+  std::vector<bool> build_valid(build_keys.size(), true);
+  build_keys.push_back(1);
+  build_valid.push_back(false);
+  auto const group_of = [](int64_t key) { return static_cast<int32_t>(((key % 5) + 5) % 5); };
+  std::vector<int32_t> build_groups;
+  for (auto const key : build_keys) {
+    build_groups.push_back(group_of(key));
+  }
+  cudf::test::fixed_width_column_wrapper<int64_t> key_column(
+    build_keys.begin(), build_keys.end(), build_valid.begin());
+  cudf::test::fixed_width_column_wrapper<int32_t> group_column(build_groups.begin(),
+                                                               build_groups.end());
+
+  auto const stream = cudf::get_default_stream();
+  auto const lookup = lto::make_lookup_table(key_column, stream);
+  EXPECT_EQ(lookup.num_rows(), static_cast<cudf::size_type>(build_keys.size() - 1));
+  struct {
+    cudf_lto_lookup lookup;
+    int32_t const* groups;
+  } const host_data{lookup.view(), cudf::column_view{group_column}.data<int32_t>()};
+  rmm::device_buffer user_data(&host_data, sizeof(host_data), stream);
+
+  std::vector<packed> keep_alive;
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions;
+  constexpr int num_groups = 5;
+  std::vector<int64_t> expected_sum(num_groups, 0);
+  std::vector<int64_t> expected_count(num_groups, 0);
+  for (unsigned p = 0; p < 3; ++p) {
+    auto const rows   = (p + 2) * tile_rows + 51 * p;
+    auto const probe  = random_values<int64_t>(rows, -6000, 21000, 50 + p);
+    auto const values = random_values<int64_t>(rows, -1'000'000, 1'000'000, 60 + p);
+    for (std::size_t i = 0; i < rows; ++i) {
+      if (probe[i] % 2 == 0 && probe[i] >= -5000 && probe[i] < 20000) {
+        expected_sum[group_of(probe[i])] += values[i];
+        expected_count[group_of(probe[i])] += 1;
+      }
+    }
+    cudf::test::fixed_width_column_wrapper<int64_t> probe_column(probe.begin(), probe.end());
+    cudf::test::fixed_width_column_wrapper<int64_t> value_column(values.begin(), values.end());
+    keep_alive.push_back(pack_lto(probe_column));
+    keep_alive.push_back(pack_lto(value_column));
+    partitions.push_back({keep_alive[keep_alive.size() - 2].view(), keep_alive.back().view()});
+  }
+
+  auto const source = lto::make_packed_source(partitions, stream);
+  auto const program =
+    lto::udf{test_fragment(cudf_test_fragments::lto_lookup_sum), cudf::lto_binary_type::FATBIN};
+  std::vector<std::vector<bool>> const lazy_cases{{}, {false, true}, {true, true}};
+  for (auto const& lazy_case : lazy_cases) {
+    std::unique_ptr<bool[]> lazy(new bool[lazy_case.size()]);
+    std::copy(lazy_case.begin(), lazy_case.end(), lazy.get());
+    auto const states = lto::groupby(source,
+                                     program,
+                                     num_groups,
+                                     2 * sizeof(int64_t),
+                                     user_data.data(),
+                                     {lazy.get(), lazy_case.size()},
+                                     stream);
+    std::vector<int64_t> result(2 * num_groups);
+    ASSERT_EQ(cudaMemcpy(result.data(), states.data(), states.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (int g = 0; g < num_groups; ++g) {
+      EXPECT_EQ(result[2 * g], expected_sum[g]);
+      EXPECT_EQ(result[2 * g + 1], expected_count[g]);
+    }
+  }
+}
+
+TEST_F(LTOUDFTest, LookupTableRejectsDuplicatesAndAcceptsEmpty)
+{
+  cudf::test::fixed_width_column_wrapper<int32_t> duplicated{4, 9, 4};
+  EXPECT_THROW(lto::make_lookup_table(duplicated), std::invalid_argument);
+  cudf::test::fixed_width_column_wrapper<double> floating{1.0, 2.0};
+  EXPECT_THROW(lto::make_lookup_table(floating), std::invalid_argument);
+  cudf::test::fixed_width_column_wrapper<int32_t> all_null({1, 2}, {false, false});
+  auto const empty = lto::make_lookup_table(all_null);
+  EXPECT_EQ(empty.num_rows(), 0);
+  EXPECT_EQ(empty.view().num_keys, 0u);
 }

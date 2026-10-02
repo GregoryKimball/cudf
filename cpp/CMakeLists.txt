@@ -996,6 +996,7 @@ add_library(
   src/lists/stream_compaction/apply_mask.cu
   src/lists/stream_compaction/distinct.cu
   src/lists/utilities.cu
+  src/lto/lookup.cu
   src/lto/udf.cu
   src/merge/merge.cu
   src/partitioning/partitioning.cu
