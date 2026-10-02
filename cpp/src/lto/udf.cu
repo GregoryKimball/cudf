@@ -342,6 +342,65 @@ packed_source make_packed_source(std::span<std::vector<packed_data_view> const> 
   return packed_source{std::move(result)};
 }
 
+namespace {
+
+/// Launches a tile kernel over `impl` that produces `num_groups` states.
+rmm::device_buffer launch_tiles(kernel const& linked,
+                                packed_source::impl const& impl,
+                                std::size_t smem_bytes,
+                                std::size_t num_groups,
+                                std::size_t state_bytes,
+                                void const* user_data,
+                                cuda::stream_ref stream,
+                                rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(smem_bytes <= static_cast<std::size_t>(
+                               device_attribute(cudaDevAttrMaxSharedMemoryPerBlockOptin)),
+               "An LTO tile and its states do not fit in shared memory; pack with smaller chunks",
+               std::invalid_argument);
+  auto const blocks_per_sm =
+    prepare_dynamic_shared_memory(linked, smem_bytes, CUDF_LTO_REDUCE_BLOCK_SIZE);
+  CUDF_EXPECTS(blocks_per_sm > 0, "The LTO kernel cannot be resident");
+  auto const grid = static_cast<unsigned int>(std::max<std::size_t>(
+    1,
+    std::min<std::size_t>(
+      impl.tiles.size(),
+      static_cast<std::size_t>(blocks_per_sm) * device_attribute(cudaDevAttrMultiProcessorCount))));
+
+  auto const temp_mr = cudf::get_current_device_resource_ref();
+  rmm::device_buffer partials(grid * num_groups * state_bytes, stream, temp_mr);
+  rmm::device_buffer counter(sizeof(unsigned int), stream, temp_mr);
+  CUDF_CUDA_TRY(cudaMemsetAsync(counter.data(), 0, sizeof(unsigned int), stream.get()));
+  rmm::device_buffer result(num_groups * state_bytes, stream, mr);
+
+  cudf_lto_reduce_args args{};
+  args.tiles       = impl.tiles.data();
+  args.chunks      = impl.chunks.data();
+  args.num_tiles   = impl.tiles.size();
+  args.num_columns = static_cast<cudf_lto_u32>(impl.num_columns);
+  args.state_bytes = static_cast<cudf_lto_u32>(state_bytes);
+  std::copy(impl.column_offsets.begin(), impl.column_offsets.end(), args.column_offsets);
+  args.tile_bytes = static_cast<cudf_lto_u32>(impl.tile_bytes);
+  args.num_groups = static_cast<cudf_lto_u32>(num_groups);
+  args.user_data  = user_data;
+  args.partials   = static_cast<unsigned char*>(partials.data());
+  args.counter    = static_cast<unsigned int*>(counter.data());
+  args.result     = static_cast<unsigned char*>(result.data());
+  void* params[]  = {&args};
+  linked.launch(
+    {grid}, {CUDF_LTO_REDUCE_BLOCK_SIZE}, static_cast<uint32_t>(smem_bytes), stream, params);
+  return result;
+}
+
+void check_state_bytes(std::size_t state_bytes)
+{
+  CUDF_EXPECTS(state_bytes > 0 && state_bytes <= CUDF_LTO_MAX_STATE_BYTES && state_bytes % 8 == 0,
+               "LTO state must be a multiple of 8 bytes, at most CUDF_LTO_MAX_STATE_BYTES",
+               std::invalid_argument);
+}
+
+}  // namespace
+
 rmm::device_buffer reduce(packed_source const& source,
                           udf row_program,
                           std::size_t state_bytes,
@@ -351,48 +410,32 @@ rmm::device_buffer reduce(packed_source const& source,
 {
   CUDF_FUNC_RANGE();
   CUDF_EXPECTS(source._impl != nullptr, "Cannot reduce a moved-from LTO source");
-  CUDF_EXPECTS(state_bytes > 0 && state_bytes <= CUDF_LTO_MAX_STATE_BYTES,
-               "LTO reduction state must be between 1 and CUDF_LTO_MAX_STATE_BYTES bytes",
-               std::invalid_argument);
+  check_state_bytes(state_bytes);
   auto const& impl  = *source._impl;
   auto const linked = link("cudf/lto/reduce", cudf_fragments::lto_reduce_kernel, row_program);
-
   auto const smem_bytes =
     std::max(impl.tile_bytes, std::size_t{CUDF_LTO_REDUCE_BLOCK_SIZE} * state_bytes);
-  CUDF_EXPECTS(smem_bytes <= static_cast<std::size_t>(
-                               device_attribute(cudaDevAttrMaxSharedMemoryPerBlockOptin)),
-               "An LTO tile does not fit in shared memory; pack with smaller chunks",
-               std::invalid_argument);
-  auto const blocks_per_sm =
-    prepare_dynamic_shared_memory(linked, smem_bytes, CUDF_LTO_REDUCE_BLOCK_SIZE);
-  CUDF_EXPECTS(blocks_per_sm > 0, "The LTO reduce kernel cannot be resident");
-  auto const grid = static_cast<unsigned int>(std::max<std::size_t>(
-    1,
-    std::min<std::size_t>(
-      impl.tiles.size(),
-      static_cast<std::size_t>(blocks_per_sm) * device_attribute(cudaDevAttrMultiProcessorCount))));
+  return launch_tiles(linked, impl, smem_bytes, 1, state_bytes, user_data, stream, mr);
+}
 
-  auto const temp_mr = cudf::get_current_device_resource_ref();
-  rmm::device_buffer partials(grid * state_bytes, stream, temp_mr);
-  rmm::device_buffer counter(sizeof(unsigned int), stream, temp_mr);
-  CUDF_CUDA_TRY(cudaMemsetAsync(counter.data(), 0, sizeof(unsigned int), stream.get()));
-  rmm::device_buffer result(state_bytes, stream, mr);
-
-  cudf_lto_reduce_args args{};
-  args.tiles       = impl.tiles.data();
-  args.chunks      = impl.chunks.data();
-  args.num_tiles   = impl.tiles.size();
-  args.num_columns = static_cast<cudf_lto_u32>(impl.num_columns);
-  args.state_bytes = static_cast<cudf_lto_u32>(state_bytes);
-  std::copy(impl.column_offsets.begin(), impl.column_offsets.end(), args.column_offsets);
-  args.user_data = user_data;
-  args.partials  = static_cast<unsigned char*>(partials.data());
-  args.counter   = static_cast<unsigned int*>(counter.data());
-  args.result    = static_cast<unsigned char*>(result.data());
-  void* params[] = {&args};
-  linked.launch(
-    {grid}, {CUDF_LTO_REDUCE_BLOCK_SIZE}, static_cast<uint32_t>(smem_bytes), stream, params);
-  return result;
+rmm::device_buffer groupby(packed_source const& source,
+                           udf row_program,
+                           std::size_t num_groups,
+                           std::size_t state_bytes,
+                           void const* user_data,
+                           cuda::stream_ref stream,
+                           rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  CUDF_EXPECTS(source._impl != nullptr, "Cannot group a moved-from LTO source");
+  CUDF_EXPECTS(num_groups > 0, "An LTO groupby needs at least one group", std::invalid_argument);
+  check_state_bytes(state_bytes);
+  auto const& impl  = *source._impl;
+  auto const linked = link("cudf/lto/groupby", cudf_fragments::lto_groupby_kernel, row_program);
+  auto const warps  = std::size_t{CUDF_LTO_REDUCE_BLOCK_SIZE / 32};
+  auto const smem_bytes =
+    impl.tile_bytes + (warps * num_groups + CUDF_LTO_REDUCE_BLOCK_SIZE) * state_bytes;
+  return launch_tiles(linked, impl, smem_bytes, num_groups, state_bytes, user_data, stream, mr);
 }
 
 }  // namespace cudf::experimental::lto

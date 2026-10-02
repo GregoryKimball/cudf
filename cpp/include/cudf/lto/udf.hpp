@@ -103,6 +103,13 @@ class packed_source {
                                    void const*,
                                    cuda::stream_ref,
                                    rmm::device_async_resource_ref);
+  friend rmm::device_buffer groupby(packed_source const&,
+                                    udf,
+                                    std::size_t,
+                                    std::size_t,
+                                    void const*,
+                                    cuda::stream_ref,
+                                    rmm::device_async_resource_ref);
 };
 
 /**
@@ -138,6 +145,34 @@ packed_source make_packed_source(
 rmm::device_buffer reduce(
   packed_source const& source,
   udf row_program,
+  std::size_t state_bytes,
+  void const* user_data             = nullptr,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Groups every row of `source` into `num_groups` dense slots with a caller row program,
+ * without unpacking.
+ *
+ * The kernel stages tiles like `reduce`, calls `cudf_lto_groupby_row` once per row, and merges
+ * each kept row's state into its slot with `cudf_lto_reduce_merge`; slots start from
+ * `cudf_lto_reduce_init`. Each warp keeps its own shared-memory copy of every slot, so
+ * `num_groups` is limited by shared memory.
+ *
+ * @param source Prepared tiles
+ * @param row_program Fragment defining the `cudf_lto_groupby_row`, `cudf_lto_reduce_init`, and
+ * `cudf_lto_reduce_merge` UDFs
+ * @param num_groups Number of dense group slots
+ * @param state_bytes Size of one slot's state, at most `CUDF_LTO_MAX_STATE_BYTES`
+ * @param user_data Device-accessible pointer passed to every `cudf_lto_groupby_row` call
+ * @param stream Stream for the groupby
+ * @param mr Device memory for the returned states
+ * @return `num_groups` states of `state_bytes` each, in slot order, in device memory
+ */
+rmm::device_buffer groupby(
+  packed_source const& source,
+  udf row_program,
+  std::size_t num_groups,
   std::size_t state_bytes,
   void const* user_data             = nullptr,
   cuda::stream_ref stream           = cudf::get_default_stream(),

@@ -29,8 +29,10 @@ typedef struct cudf_lto_reduce_args {
   cudf_lto_u32 num_columns;
   cudf_lto_u32 state_bytes;
   cudf_lto_u32 column_offsets[CUDF_LTO_MAX_COLUMNS];  ///< Shared-memory offset of each column
+  cudf_lto_u32 tile_bytes;                            ///< Shared memory holding one staged tile
+  cudf_lto_u32 num_groups;                            ///< Group slots; groupby only
   void const* user_data;
-  unsigned char* partials;  ///< One state per block
+  unsigned char* partials;  ///< One state per block, or per block and group for groupby
   unsigned int* counter;    ///< Zero before launch; counts finished blocks
-  unsigned char* result;    ///< Final state
+  unsigned char* result;    ///< Final state, or one per group for groupby
 } cudf_lto_reduce_args;

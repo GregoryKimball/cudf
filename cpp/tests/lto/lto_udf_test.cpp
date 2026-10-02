@@ -8,6 +8,7 @@
 #include <cudf_test/column_wrapper.hpp>
 
 #include <cudf/contiguous_split.hpp>
+#include <cudf/dictionary/dictionary_column_view.hpp>
 #include <cudf/lto/udf.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/utilities/default_stream.hpp>
@@ -22,6 +23,7 @@
 #include <memory>
 #include <numeric>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace {
@@ -70,9 +72,10 @@ packed pack_lto(cudf::column_view column)
     cudf::experimental::make_pack_plan_builder(cudf::table_view{{column}}, options, stream);
   for (auto& region : builder.regions()) {
     if (region.info.kind != cudf::experimental::pack_region_kind::data) { continue; }
-    region.options.codec                   = cudf::experimental::pack_compression::lto;
-    region.options.lto_codec_id            = for_bitpack_id;
-    region.options.compression_chunk_bytes = tile_rows * cudf::size_of(column.type());
+    region.options.codec        = cudf::experimental::pack_compression::lto;
+    region.options.lto_codec_id = for_bitpack_id;
+    region.options.compression_chunk_bytes =
+      tile_rows * cudf::size_of(cudf::data_type{region.info.type});
   }
   auto const plan = std::move(builder).build();
   rmm::device_buffer scratch(plan.sizes().payload_bytes, stream);
@@ -174,5 +177,57 @@ TEST_F(LTOUDFTest, FilteredSumOverPartitions)
               cudaSuccess);
     EXPECT_EQ(result[0], expected_sum);
     EXPECT_EQ(result[1], expected_count);
+  }
+}
+
+TEST_F(LTOUDFTest, GroupedSumOverDictionaryCodes)
+{
+  std::vector<std::string> const keys{"apple", "fig", "kiwi", "lime", "pear"};
+  std::vector<packed> keep_alive;
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions;
+  std::vector<int64_t> expected_sum(keys.size(), 0);
+  std::vector<int64_t> expected_count(keys.size(), 0);
+  for (unsigned p = 0; p < 3; ++p) {
+    auto const rows = (p + 2) * tile_rows + 77 * p;
+    auto const codes =
+      random_values<int32_t>(rows, 0, static_cast<int32_t>(keys.size()) - 1, 30 + p);
+    auto const values = random_values<int64_t>(rows, -1'000'000, 1'000'000, 40 + p);
+    std::vector<std::string> strings;
+    for (std::size_t i = 0; i < rows; ++i) {
+      strings.push_back(keys[codes[i]]);
+    }
+    cudf::test::dictionary_column_wrapper<std::string> key_column(strings.begin(), strings.end());
+    auto const indices =
+      cudf::test::to_host<int32_t>(cudf::dictionary_column_view{key_column}.get_indices_annotated())
+        .first;
+    for (std::size_t i = 0; i < rows; ++i) {
+      if (values[i] % 7 != 0) {
+        expected_sum[indices[i]] += values[i];
+        expected_count[indices[i]] += 1;
+      }
+    }
+    cudf::test::fixed_width_column_wrapper<int64_t> value_column(values.begin(), values.end());
+    keep_alive.push_back(pack_lto(key_column));
+    keep_alive.push_back(pack_lto(value_column));
+    auto const round_trip =
+      cudf::experimental::materialize(keep_alive[keep_alive.size() - 2].view());
+    CUDF_TEST_EXPECT_COLUMNS_EQUAL(round_trip->get_column(0).view(), key_column);
+    partitions.push_back({keep_alive[keep_alive.size() - 2].view(), keep_alive.back().view()});
+  }
+
+  auto const stream = cudf::get_default_stream();
+  auto const source = lto::make_packed_source(partitions, stream);
+  auto const program =
+    lto::udf{test_fragment(cudf_test_fragments::lto_grouped_sum), cudf::lto_binary_type::FATBIN};
+  for (int run = 0; run < 2; ++run) {
+    auto const states =
+      lto::groupby(source, program, keys.size(), 2 * sizeof(int64_t), nullptr, stream);
+    std::vector<int64_t> result(2 * keys.size());
+    ASSERT_EQ(cudaMemcpy(result.data(), states.data(), states.size(), cudaMemcpyDeviceToHost),
+              cudaSuccess);
+    for (std::size_t g = 0; g < keys.size(); ++g) {
+      EXPECT_EQ(result[2 * g], expected_sum[g]);
+      EXPECT_EQ(result[2 * g + 1], expected_count[g]);
+    }
   }
 }

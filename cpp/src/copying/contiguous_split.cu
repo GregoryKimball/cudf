@@ -3758,10 +3758,14 @@ packed_column_chunks read_packed_column_chunks(packed_data_view input, cuda::str
   auto const parsed   = parse_compressed_metadata(input.metadata);
   auto const metadata = packed_metadata_view{parsed.legacy_metadata};
   CUDF_EXPECTS(metadata.num_columns() == 1, "Expected one packed column", std::invalid_argument);
-  auto const column = metadata.column(0);
+  auto const top = metadata.column(0);
+  CUDF_EXPECTS(
+    top.null_mask_offset() == -1, "Expected a non-nullable column", std::invalid_argument);
+  // A dictionary column contributes its indices; their values are codes into the keys.
+  auto const column = top.type().id() == type_id::DICTIONARY32 ? top.child(0) : top;
   CUDF_EXPECTS(is_fixed_width(column.type()) && column.num_children() == 0 &&
                  column.null_mask_offset() == -1 && column.data_offset() >= 0,
-               "Expected a non-nullable fixed-width column",
+               "Expected a non-nullable fixed-width or dictionary column",
                std::invalid_argument);
   auto const entry = std::find_if(parsed.entries.begin(), parsed.entries.end(), [&](auto const& e) {
     return e.is_validity == 0 &&

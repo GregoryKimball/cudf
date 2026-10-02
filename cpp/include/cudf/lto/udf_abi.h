@@ -29,6 +29,8 @@
 #define CUDF_LTO_MAX_COLUMNS 32
 /// Alignment of every encoded chunk in a packed payload and of every staged tile column.
 #define CUDF_LTO_CHUNK_ALIGNMENT 16
+/// Slot a groupby row program returns for a row it drops.
+#define CUDF_LTO_SKIP_ROW 0xffffffffU
 
 typedef unsigned int cudf_lto_u32;
 typedef unsigned long long cudf_lto_u64;
@@ -118,6 +120,22 @@ __device__ void cudf_lto_reduce_row(void const* user_data,
 
 /// Combines `other` into `state`; must be associative and commutative.
 __device__ void cudf_lto_reduce_merge(void* state, void const* other);
+
+/* ---- Groupby hook: a groupby row program defines this plus `_init` and `_merge`. ---------- */
+
+/**
+ * @brief Classifies row `row` of `tile` into a dense group slot.
+ *
+ * Called once per row by one thread. For a kept row, writes the complete state of that row alone
+ * to `row_state` and returns its slot, below the `num_groups` passed to the groupby; the kernel
+ * merges it into the slot with `cudf_lto_reduce_merge`.
+ *
+ * @return The row's slot, or `CUDF_LTO_SKIP_ROW` to drop the row
+ */
+__device__ cudf_lto_u32 cudf_lto_groupby_row(void const* user_data,
+                                             cudf_lto_tile const* tile,
+                                             cudf_lto_u32 row,
+                                             void* row_state);
 
 #endif /* __CUDACC__ */
 
