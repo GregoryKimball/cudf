@@ -489,6 +489,43 @@ kernel_instance={}
   return fut.get();
 }
 
+rtcx::blob get_source_fragment(std::string const& name, std::string const& source)
+{
+  CUDF_FUNC_RANGE();
+
+  auto& ctx               = cudf::get_context();
+  auto& cache             = ctx.rtcx_cache();
+  auto& device_properties = ctx.get_device_properties();
+
+  auto spec = std::format(R"***(sourceFragment
+name={}
+binary_type=LTO_IR
+cuda_runtime={}
+cuda_driver={}
+arch={}
+bundle={}
+)***",
+                          name,
+                          device_properties.runtime_version,
+                          device_properties.driver_version,
+                          LTO_ARCHITECTURE,
+                          ctx.jit_bundle().get_hash());
+
+  XXH3_state_t state;
+  XXH3_INITSTATE(&state);
+  XXH3_128bits_reset(&state);
+  hash(&state, spec);
+  hash(&state, "source: ");
+  hash(&state, source);
+
+  auto digest = XXH3_128bits_digest(&state);
+  auto key    = rtcx::hash128{digest.high64, digest.low64};
+
+  auto compile = [&] { return compile_fragment(name.c_str(), source.c_str(), {}, {}, {}); };
+
+  return cache.get_or_add_blob(key, rtcx::blob_compile_func::from_functor(compile)).get();
+}
+
 std::tuple<rtcx::library, rtcx::blob> link_library_uncached(
   char const* name,
   std::span<rtcx::file_fragment const> file_fragments,

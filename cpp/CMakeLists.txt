@@ -644,6 +644,13 @@ endfunction()
 precompile_fixed_width_kernel_fragments()
 precompile_string_kernel_fragments()
 
+# Precompiled LTO kernel fragments, linked at runtime with caller fragments.
+foreach(KERNEL IN ITEMS encode decode reduce groupby hash_groupby select)
+  add_fragment(
+    cudf_fragments FRAGMENT lto_${KERNEL}_kernel SOURCE src/lto/jit/${KERNEL}.cu
+  )
+endforeach()
+
 rtcx_embed(cudf_fragments COMPRESSION none OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/embed")
 
 # ##################################################################################################
@@ -989,6 +996,8 @@ add_library(
   src/lists/stream_compaction/apply_mask.cu
   src/lists/stream_compaction/distinct.cu
   src/lists/utilities.cu
+  src/lto/lookup.cu
+  src/lto/udf.cu
   src/merge/merge.cu
   src/partitioning/partitioning.cu
   src/partitioning/round_robin.cu

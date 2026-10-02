@@ -717,6 +717,25 @@ add_fragment(
 
 add_fragment(cudf_test_fragments FRAGMENT to_upper SOURCE transform/fragments/to_upper.cu)
 
+add_fragment(cudf_test_fragments FRAGMENT lto_for_bitpack SOURCE lto/fragments/for_bitpack.cu)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_for_bitpack_read SOURCE lto/fragments/for_bitpack_read.cu
+)
+
+add_fragment(cudf_test_fragments FRAGMENT lto_filtered_sum SOURCE lto/fragments/filtered_sum.cu)
+add_fragment(cudf_test_fragments FRAGMENT lto_grouped_sum SOURCE lto/fragments/grouped_sum.cu)
+add_fragment(cudf_test_fragments FRAGMENT lto_lookup_sum SOURCE lto/fragments/lookup_sum.cu)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_hash_grouped_sum SOURCE lto/fragments/hash_grouped_sum.cu
+)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_hash_lookup_sum SOURCE lto/fragments/hash_lookup_sum.cu
+)
+add_fragment(cudf_test_fragments FRAGMENT lto_exists_count SOURCE lto/fragments/exists_count.cu)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_filtered_select SOURCE lto/fragments/filtered_select.cu
+)
+
 rtcx_embed(
   cudf_test_fragments COMPRESSION none OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/rtcx_embed"
 )
@@ -727,6 +746,12 @@ ConfigureTest(
 )
 add_dependencies(TRANSFORM_LTO_TEST cudf_test_fragments)
 target_include_directories(TRANSFORM_LTO_TEST PRIVATE ${cudf_test_fragments_SOURCE_DIR})
+
+ConfigureTest(
+  LTO_UDF_TEST lto/lto_udf_test.cpp ${cudf_test_fragments_SOURCE_DIR}/cudf_test_fragments.s
+)
+add_dependencies(LTO_UDF_TEST cudf_test_fragments)
+target_include_directories(LTO_UDF_TEST PRIVATE ${cudf_test_fragments_SOURCE_DIR})
 
 # ##################################################################################################
 # * lists tests ----------------------------------------------------------------------------------

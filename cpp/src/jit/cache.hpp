@@ -107,6 +107,13 @@ rtcx::blob get_kernel_fragment(std::string const& name,
                                std::string const& kernel_instance);
 
 /**
+ * @brief Gets an LTO-IR fragment compiled from in-memory CUDA source, cached on the source
+ * @param name Debug name for the fragment
+ * @param source Self-contained CUDA source; it can include only the JIT bundle's headers
+ */
+rtcx::blob get_source_fragment(std::string const& name, std::string const& source);
+
+/**
  * @brief Gets a kernel by linking together embedded binary fragments
  * @param name Debug name for the kernel (used for caching and logging)
  * @param file_fragments Paths of the fragments to link together to form the kernel
