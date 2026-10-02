@@ -39,9 +39,9 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_BLOCK_SIZE)
     __syncthreads();
     for (cudf_lto_u32 segment = 0; segment < tile.num_rows; segment += segment_rows) {
       for (unsigned int step = 0; step < segment_steps; ++step) {
-        auto const row = segment + step * CUDF_LTO_BLOCK_SIZE + threadIdx.x;
-        auto const keep =
-          row < tile.num_rows && cudf_lto_select_row(args.user_data, &tile, row) != 0;
+        auto const row     = segment + step * CUDF_LTO_BLOCK_SIZE + threadIdx.x;
+        auto const current = cudf_lto_kernel::row_of(tile, row);
+        auto const keep = row < tile.num_rows && cudf_lto_select_row(args.user_data, &current) != 0;
         auto const mask = __ballot_sync(0xffffffffU, keep);
         if (lane == 0) { masks[step * warps_per_block + warp] = mask; }
       }
@@ -75,11 +75,9 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_BLOCK_SIZE)
         if ((bits >> lane) & 1U) {
           auto const output_row = segment_base + offsets[word] + __popc(bits & ((1U << lane) - 1U));
           if (output_row < args.capacity) {
-            cudf_lto_select_emit(args.user_data,
-                                 &tile,
-                                 segment + step * CUDF_LTO_BLOCK_SIZE + threadIdx.x,
-                                 args.outputs,
-                                 output_row);
+            auto const current =
+              cudf_lto_kernel::row_of(tile, segment + step * CUDF_LTO_BLOCK_SIZE + threadIdx.x);
+            cudf_lto_select_emit(args.user_data, &current, args.outputs, output_row);
           }
         }
       }

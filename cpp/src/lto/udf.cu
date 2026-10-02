@@ -22,6 +22,7 @@
 #include <cuda.h>
 #include <cuda/iterator>
 #include <cuda_runtime_api.h>
+#include <thrust/copy.h>
 #include <thrust/for_each.h>
 
 #include <cudf_fragments.hpp>
@@ -29,8 +30,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstddef>
 #include <limits>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -171,6 +175,9 @@ void register_codec(uint32_t id, codec codec)
   CUDF_EXPECTS(!codec.binary.empty() && codec.max_encoded_bytes,
                "An LTO codec needs a fragment and an encoded-size bound",
                std::invalid_argument);
+  CUDF_EXPECTS(!codec.reader.empty() && !codec.reader_symbol.empty(),
+               "An LTO codec needs a reader fragment and its symbol",
+               std::invalid_argument);
   auto& reg = registry();
   std::lock_guard const lock{reg.mutex};
   CUDF_EXPECTS(reg.codecs.emplace(id, std::move(codec)).second,
@@ -255,6 +262,7 @@ struct packed_source::impl {
   uint64_t num_rows       = 0;
   std::size_t tile_bytes  = 0;
   std::array<std::size_t, CUDF_LTO_MAX_COLUMNS> max_chunk_bytes{};
+  std::array<uint32_t, CUDF_LTO_MAX_COLUMNS> codec_ids{};
   rmm::device_uvector<cudf_lto_tile_desc> tiles;
   rmm::device_uvector<cudf_lto_chunk_ref> chunks;
 };
@@ -287,6 +295,7 @@ packed_source make_packed_source(std::span<std::vector<packed_data_view> const> 
   std::vector<cudf_lto_tile_desc> tiles;
   std::vector<cudf_lto_chunk_ref> chunks;
   std::vector<std::size_t> max_bytes(num_columns, 0);
+  std::vector<uint32_t> codec_ids;
   uint64_t row_base = 0;
   for (auto const& partition : partitions) {
     CUDF_EXPECTS(partition.size() == num_columns,
@@ -300,6 +309,16 @@ packed_source make_packed_source(std::span<std::vector<packed_data_view> const> 
                    "Every column of an LTO source must use an LTO codec",
                    std::invalid_argument);
       directories.push_back(std::move(directory));
+    }
+    if (codec_ids.empty()) {
+      for (auto const& directory : directories) {
+        codec_ids.push_back(directory.lto_codec_id);
+      }
+    }
+    for (std::size_t c = 0; c < num_columns; ++c) {
+      CUDF_EXPECTS(directories[c].lto_codec_id == codec_ids[c],
+                   "Every partition of an LTO source needs the same codec per column",
+                   std::invalid_argument);
     }
     auto const& first        = directories.front();
     auto const rows_per_tile = first.chunk_bytes / size_of(first.type);
@@ -334,10 +353,12 @@ packed_source make_packed_source(std::span<std::vector<packed_data_view> const> 
                         row_base,
                         0,
                         {},
+                        {},
                         cudf::detail::make_device_uvector_async(tiles, stream, mr),
                         cudf::detail::make_device_uvector_async(chunks, stream, mr)});
   for (std::size_t c = 0; c < num_columns; ++c) {
     result->max_chunk_bytes[c] = max_bytes[c];
+    result->codec_ids[c]       = codec_ids[c];
     result->tile_bytes +=
       cudf::util::round_up_safe(max_bytes[c], std::size_t{CUDF_LTO_CHUNK_ALIGNMENT});
   }
@@ -346,6 +367,69 @@ packed_source make_packed_source(std::span<std::vector<packed_data_view> const> 
 }
 
 namespace {
+
+static_assert(offsetof(cudf_lto_row, columns) == 0 && offsetof(cudf_lto_row, first_row) == 8 &&
+                offsetof(cudf_lto_row, index) == 16,
+              "cudf_lto_row_source must match cudf_lto_row");
+
+constexpr char const* cudf_lto_row_source = R"***(
+struct cudf_lto_row {
+  unsigned char const* const* columns;
+  unsigned long long first_row;
+  unsigned int index;
+};
+)***";
+
+/// The distinct codecs of the columns of `impl`.
+std::vector<codec const*> distinct_codecs(packed_source::impl const& impl)
+{
+  std::vector<uint32_t> ids(impl.codec_ids.begin(), impl.codec_ids.begin() + impl.num_columns);
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  std::vector<codec const*> codecs;
+  for (auto const id : ids) {
+    codecs.push_back(&registered_codec(id));
+  }
+  return codecs;
+}
+
+/// Source defining `cudf_lto_get` and `cudf_lto_row_index` over the columns of `impl`.
+std::string dispatch_source(packed_source::impl const& impl)
+{
+  std::ostringstream source;
+  source << "extern \"C\" {\n" << cudf_lto_row_source;
+  for (auto const* codec : distinct_codecs(impl)) {
+    source << "__device__ long long " << codec->reader_symbol
+           << "(unsigned char const*, unsigned int);\n";
+  }
+  source << "__device__ long long cudf_lto_get(cudf_lto_row const* row, unsigned int column)\n"
+            "{\n  switch (column) {\n";
+  for (std::size_t c = 0; c < impl.num_columns; ++c) {
+    source << "    case " << c << ": return " << registered_codec(impl.codec_ids[c]).reader_symbol
+           << "(row->columns[" << c << "], row->index);\n";
+  }
+  source << "    default: return 0;\n  }\n}\n"
+            "__device__ unsigned long long cudf_lto_row_index(cudf_lto_row const* row)\n"
+            "{\n  return row->first_row + row->index;\n}\n}\n";
+  return source.str();
+}
+
+/// Links a tile kernel with a row program, the column dispatch of `impl`, and its codec readers.
+kernel link_row_program(char const* name,
+                        std::size_t fragment_index,
+                        packed_source::impl const& impl,
+                        udf const& user)
+{
+  auto const dispatch = get_source_fragment("cudf/lto/dispatch", dispatch_source(impl));
+  std::vector<rtcx::memory_fragment> fragments{
+    {.data = kernel_fragment(fragment_index), .type = rtcx::binary_type::FATBIN, .name = name},
+    {.data = user.binary, .type = to_rtcx(user.type), .name = nullptr},
+    {.data = dispatch->view(), .type = rtcx::binary_type::LTO_IR, .name = nullptr}};
+  for (auto const* codec : distinct_codecs(impl)) {
+    fragments.push_back({.data = codec->reader, .type = to_rtcx(codec->type), .name = nullptr});
+  }
+  return get_lto_linked_kernel(name, {}, fragments);
+}
 
 /// Shared-memory placement of a tile's staged columns; lazy columns take no space.
 struct tile_layout {
@@ -456,8 +540,9 @@ rmm::device_buffer reduce(packed_source const& source,
   CUDF_FUNC_RANGE();
   CUDF_EXPECTS(source._impl != nullptr, "Cannot reduce a moved-from LTO source");
   check_state_bytes(state_bytes);
-  auto const& impl      = *source._impl;
-  auto const linked     = link("cudf/lto/reduce", cudf_fragments::lto_reduce_kernel, row_program);
+  auto const& impl = *source._impl;
+  auto const linked =
+    link_row_program("cudf/lto/reduce", cudf_fragments::lto_reduce_kernel, impl, row_program);
   auto const layout     = make_layout(impl, lazy_columns);
   auto const smem_bytes = std::max(layout.bytes, std::size_t{CUDF_LTO_BLOCK_SIZE} * state_bytes);
   return launch_tiles(linked, impl, layout, smem_bytes, 1, state_bytes, user_data, stream, mr);
@@ -476,13 +561,119 @@ rmm::device_buffer groupby(packed_source const& source,
   CUDF_EXPECTS(source._impl != nullptr, "Cannot group a moved-from LTO source");
   CUDF_EXPECTS(num_groups > 0, "An LTO groupby needs at least one group", std::invalid_argument);
   check_state_bytes(state_bytes);
-  auto const& impl      = *source._impl;
-  auto const linked     = link("cudf/lto/groupby", cudf_fragments::lto_groupby_kernel, row_program);
+  auto const& impl = *source._impl;
+  auto const linked =
+    link_row_program("cudf/lto/groupby", cudf_fragments::lto_groupby_kernel, impl, row_program);
   auto const warps      = std::size_t{CUDF_LTO_BLOCK_SIZE / 32};
   auto const layout     = make_layout(impl, lazy_columns);
   auto const smem_bytes = layout.bytes + (warps * num_groups + CUDF_LTO_BLOCK_SIZE) * state_bytes;
   return launch_tiles(
     linked, impl, layout, smem_bytes, num_groups, state_bytes, user_data, stream, mr);
+}
+
+hash_groupby_result hash_groupby(packed_source const& source,
+                                 udf row_program,
+                                 std::size_t num_key_words,
+                                 std::size_t state_bytes,
+                                 std::size_t expected_groups,
+                                 void const* user_data,
+                                 std::span<bool const> lazy_columns,
+                                 cuda::stream_ref stream,
+                                 rmm::device_async_resource_ref mr)
+{
+  CUDF_FUNC_RANGE();
+  CUDF_EXPECTS(source._impl != nullptr, "Cannot group a moved-from LTO source");
+  CUDF_EXPECTS(num_key_words > 0 && num_key_words <= CUDF_LTO_MAX_KEY_WORDS,
+               "An LTO hash groupby key needs between 1 and CUDF_LTO_MAX_KEY_WORDS words",
+               std::invalid_argument);
+  check_state_bytes(state_bytes);
+  auto const& impl  = *source._impl;
+  auto const linked = link_row_program(
+    "cudf/lto/hash_groupby", cudf_fragments::lto_hash_groupby_kernel, impl, row_program);
+  auto const layout     = make_layout(impl, lazy_columns);
+  auto const smem_bytes = layout.bytes + std::size_t{CUDF_LTO_BLOCK_SIZE} * state_bytes;
+  auto const grid       = tile_grid(linked, impl, smem_bytes);
+  auto const temp_mr    = cudf::get_current_device_resource_ref();
+  auto const policy     = rmm::exec_policy_nosync(stream, temp_mr);
+
+  cudf_lto_hash_groupby_args args{};
+  args.source        = make_tile_source(impl, layout);
+  args.state_bytes   = static_cast<cudf_lto_u32>(state_bytes);
+  args.num_key_words = static_cast<cudf_lto_u32>(num_key_words);
+  args.user_data     = user_data;
+  rmm::device_uvector<unsigned int> overflow(1, stream, temp_mr);
+  args.overflow = overflow.data();
+
+  // A table at most half full keeps probe sequences short; a full table rescans with twice the
+  // slots.
+  auto capacity = std::bit_ceil(std::max<std::size_t>(2 * expected_groups, 1024));
+  rmm::device_uvector<unsigned int> slot_status(0, stream, temp_mr);
+  rmm::device_uvector<long long> keys(0, stream, temp_mr);
+  rmm::device_buffer states(0, stream, temp_mr);
+  while (true) {
+    slot_status.resize(capacity, stream);
+    keys.resize(capacity * num_key_words, stream);
+    states.resize(capacity * state_bytes, stream);
+    CUDF_CUDA_TRY(
+      cudaMemsetAsync(slot_status.data(), 0, capacity * sizeof(unsigned int), stream.get()));
+    CUDF_CUDA_TRY(cudaMemsetAsync(overflow.data(), 0, sizeof(unsigned int), stream.get()));
+    args.capacity_mask = capacity - 1;
+    args.status        = slot_status.data();
+    args.keys          = keys.data();
+    args.states        = static_cast<unsigned char*>(states.data());
+    void* params[]     = {&args};
+    linked.launch({grid}, {CUDF_LTO_BLOCK_SIZE}, static_cast<uint32_t>(smem_bytes), stream, params);
+    if (overflow.front_element(stream) == 0) { break; }
+    capacity *= 2;
+  }
+
+  rmm::device_uvector<cudf_lto_u64> slots(capacity, stream, temp_mr);
+  auto const slots_end  = thrust::copy_if(policy,
+                                         cuda::counting_iterator<cudf_lto_u64>{0},
+                                         cuda::counting_iterator<cudf_lto_u64>{capacity},
+                                         slots.begin(),
+                                         [status = slot_status.data()] __device__(cudf_lto_u64 s) {
+                                           return status[s] != CUDF_LTO_SLOT_EMPTY;
+                                         });
+  auto const num_groups = static_cast<std::size_t>(slots_end - slots.begin());
+  CUDF_EXPECTS(num_groups <= static_cast<std::size_t>(std::numeric_limits<size_type>::max()),
+               "An LTO hash groupby found more groups than a column can hold",
+               std::overflow_error);
+
+  std::vector<std::unique_ptr<column>> key_columns;
+  std::vector<long long*> key_data;
+  for (std::size_t w = 0; w < num_key_words; ++w) {
+    key_columns.push_back(
+      std::make_unique<column>(data_type{type_id::INT64},
+                               static_cast<size_type>(num_groups),
+                               rmm::device_buffer{num_groups * sizeof(long long), stream, mr},
+                               rmm::device_buffer{},
+                               0));
+    key_data.push_back(key_columns.back()->mutable_view().data<long long>());
+  }
+  auto const d_key_data = cudf::detail::make_device_uvector_async(key_data, stream, temp_mr);
+  rmm::device_buffer result_states(num_groups * state_bytes, stream, mr);
+  thrust::for_each_n(policy,
+                     cuda::counting_iterator<std::size_t>{0},
+                     num_groups,
+                     [slots         = slots.data(),
+                      keys          = keys.data(),
+                      states        = static_cast<unsigned char const*>(states.data()),
+                      key_columns   = d_key_data.data(),
+                      result_states = static_cast<unsigned char*>(result_states.data()),
+                      num_key_words,
+                      state_bytes] __device__(std::size_t g) {
+                       auto const s = slots[g];
+                       for (std::size_t w = 0; w < num_key_words; ++w) {
+                         key_columns[w][g] = keys[s * num_key_words + w];
+                       }
+                       for (std::size_t b = 0; b < state_bytes; ++b) {
+                         result_states[g * state_bytes + b] = states[s * state_bytes + b];
+                       }
+                     });
+  stream.sync();
+  return hash_groupby_result{std::make_unique<table>(std::move(key_columns)),
+                             std::move(result_states)};
 }
 
 std::unique_ptr<table> select(packed_source const& source,
@@ -505,8 +696,9 @@ std::unique_ptr<table> select(packed_source const& source,
                "LTO filtered scan outputs must be fixed-width",
                std::invalid_argument);
   CUDF_EXPECTS(expected_rows >= 0, "Expected rows cannot be negative", std::invalid_argument);
-  auto const& impl  = *source._impl;
-  auto const linked = link("cudf/lto/select", cudf_fragments::lto_select_kernel, row_program);
+  auto const& impl = *source._impl;
+  auto const linked =
+    link_row_program("cudf/lto/select", cudf_fragments::lto_select_kernel, impl, row_program);
   auto const layout = make_layout(impl, lazy_columns);
   auto const grid   = tile_grid(linked, impl, layout.bytes);
 

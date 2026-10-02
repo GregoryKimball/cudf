@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,11 +47,14 @@ void register_for_bitpack()
 {
   if (lto::is_codec_registered(for_bitpack_id)) { return; }
   auto const binary = test_fragment(cudf_test_fragments::lto_for_bitpack);
+  auto const reader = test_fragment(cudf_test_fragments::lto_for_bitpack_read);
   lto::register_codec(
     for_bitpack_id,
     lto::codec{std::vector<uint8_t>(binary.begin(), binary.end()),
                cudf::lto_binary_type::FATBIN,
-               [](std::size_t chunk_bytes) { return 16 + (chunk_bytes + 7) / 8 * 8 + 8; }});
+               [](std::size_t chunk_bytes) { return 16 + (chunk_bytes + 7) / 8 * 8 + 8; },
+               std::vector<uint8_t>(reader.begin(), reader.end()),
+               "test_for_bitpack_read"});
 }
 
 struct packed {
@@ -320,6 +325,184 @@ TEST_F(LTOUDFTest, LookupTableRejectsDuplicatesAndAcceptsEmpty)
   auto const empty = lto::make_lookup_table(all_null);
   EXPECT_EQ(empty.num_rows(), 0);
   EXPECT_EQ(empty.view().num_keys, 0u);
+}
+
+TEST_F(LTOUDFTest, HashGroupbyCompositeKeys)
+{
+  std::vector<packed> keep_alive;
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions;
+  std::map<std::pair<int64_t, int64_t>, std::pair<int64_t, int64_t>> expected;
+  for (unsigned p = 0; p < 3; ++p) {
+    auto const rows   = (p + 4) * tile_rows + 91 * p;
+    auto const keys   = random_values<int64_t>(rows, 0, 9999, 70 + p);
+    auto const values = random_values<int64_t>(rows, -1'000'000, 1'000'000, 80 + p);
+    for (std::size_t i = 0; i < rows; ++i) {
+      if (values[i] % 11 == 0) { continue; }
+      auto& group = expected[{keys[i], ((values[i] % 3) + 3) % 3}];
+      group.first += values[i];
+      group.second += 1;
+    }
+    cudf::test::fixed_width_column_wrapper<int64_t> key_column(keys.begin(), keys.end());
+    cudf::test::fixed_width_column_wrapper<int64_t> value_column(values.begin(), values.end());
+    keep_alive.push_back(pack_lto(key_column));
+    keep_alive.push_back(pack_lto(value_column));
+    partitions.push_back({keep_alive[keep_alive.size() - 2].view(), keep_alive.back().view()});
+  }
+
+  auto const stream  = cudf::get_default_stream();
+  auto const source  = lto::make_packed_source(partitions, stream);
+  auto const program = lto::udf{test_fragment(cudf_test_fragments::lto_hash_grouped_sum),
+                                cudf::lto_binary_type::FATBIN};
+  // An estimate far below the group count forces rescans with larger tables.
+  for (std::size_t const expected_groups : {std::size_t{1}, expected.size()}) {
+    auto const result = lto::hash_groupby(
+      source, program, 2, 2 * sizeof(int64_t), expected_groups, nullptr, {}, stream);
+    ASSERT_EQ(result.keys->num_columns(), 2);
+    auto const n = static_cast<std::size_t>(result.keys->num_rows());
+    ASSERT_EQ(n, expected.size());
+    auto const k0 = cudf::test::to_host<int64_t>(result.keys->get_column(0).view()).first;
+    auto const k1 = cudf::test::to_host<int64_t>(result.keys->get_column(1).view()).first;
+    std::vector<int64_t> states(2 * n);
+    ASSERT_EQ(
+      cudaMemcpy(states.data(), result.states.data(), result.states.size(), cudaMemcpyDeviceToHost),
+      cudaSuccess);
+    for (std::size_t g = 0; g < n; ++g) {
+      auto const it = expected.find({k0[g], k1[g]});
+      ASSERT_NE(it, expected.end());
+      EXPECT_EQ(states[2 * g], it->second.first);
+      EXPECT_EQ(states[2 * g + 1], it->second.second);
+    }
+  }
+}
+
+TEST_F(LTOUDFTest, HashLookupMultiMatchCompositeKeys)
+{
+  // Build side: keys (k0, k1) with k0 in [0, 300) and k1 in [0, 4), each repeated 0 to 3 times,
+  // plus a row with a null key.
+  std::vector<int32_t> build_k0;
+  std::vector<int64_t> build_k1;
+  std::vector<int64_t> build_values;
+  std::map<std::pair<int64_t, int64_t>, std::vector<int64_t>> build;
+  std::mt19937 engine{11};
+  for (int32_t k0 = 0; k0 < 300; ++k0) {
+    for (int64_t k1 = 0; k1 < 4; ++k1) {
+      auto const copies = static_cast<int>(engine() % 4);
+      for (int c = 0; c < copies; ++c) {
+        auto const value = static_cast<int64_t>(engine() % 1000) - 500;
+        build_k0.push_back(k0);
+        build_k1.push_back(k1);
+        build_values.push_back(value);
+        build[{k0, k1}].push_back(value);
+      }
+    }
+  }
+  std::vector<bool> valid(build_k0.size(), true);
+  build_k0.push_back(7);
+  build_k1.push_back(1);
+  build_values.push_back(1'000'000);
+  valid.push_back(false);
+  cudf::test::fixed_width_column_wrapper<int32_t> k0_column(
+    build_k0.begin(), build_k0.end(), valid.begin());
+  cudf::test::fixed_width_column_wrapper<int64_t> k1_column(build_k1.begin(), build_k1.end());
+  cudf::test::fixed_width_column_wrapper<int64_t> value_column(build_values.begin(),
+                                                               build_values.end());
+
+  auto const stream = cudf::get_default_stream();
+  auto const lookup =
+    lto::make_hash_lookup_table(cudf::table_view{{k0_column, k1_column}}, true, stream);
+  EXPECT_EQ(lookup.num_rows(), static_cast<cudf::size_type>(build_k0.size() - 1));
+  EXPECT_EQ(lookup.view().num_groups, build.size());
+  EXPECT_FALSE(lookup.unique());
+  struct {
+    cudf_lto_hash_lookup lookup;
+    int64_t const* values;
+  } const host_data{lookup.view(), cudf::column_view{value_column}.data<int64_t>()};
+  rmm::device_buffer user_data(&host_data, sizeof(host_data), stream);
+
+  std::vector<packed> keep_alive;
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions;
+  int64_t expected_sum   = 0;
+  int64_t expected_count = 0;
+  for (unsigned p = 0; p < 2; ++p) {
+    auto const rows        = (p + 2) * tile_rows + 13 * p;
+    auto const probe_k0    = random_values<int64_t>(rows, -10, 310, 90 + p);
+    auto const probe_k1    = random_values<int64_t>(rows, 0, 4, 100 + p);
+    auto const multipliers = random_values<int64_t>(rows, -9, 9, 110 + p);
+    for (std::size_t i = 0; i < rows; ++i) {
+      auto const it = build.find({probe_k0[i], probe_k1[i]});
+      if (it == build.end()) { continue; }
+      for (auto const value : it->second) {
+        expected_sum += multipliers[i] * value;
+        expected_count += 1;
+      }
+    }
+    for (auto const* values : {&probe_k0, &probe_k1, &multipliers}) {
+      cudf::test::fixed_width_column_wrapper<int64_t> column(values->begin(), values->end());
+      keep_alive.push_back(pack_lto(column));
+    }
+    auto const n = keep_alive.size();
+    partitions.push_back(
+      {keep_alive[n - 3].view(), keep_alive[n - 2].view(), keep_alive[n - 1].view()});
+  }
+
+  auto const source  = lto::make_packed_source(partitions, stream);
+  auto const program = lto::udf{test_fragment(cudf_test_fragments::lto_hash_lookup_sum),
+                                cudf::lto_binary_type::FATBIN};
+  auto const state =
+    lto::reduce(source, program, 2 * sizeof(int64_t), user_data.data(), {}, stream);
+  int64_t result[2];
+  ASSERT_EQ(cudaMemcpy(result, state.data(), sizeof(result), cudaMemcpyDeviceToHost), cudaSuccess);
+  EXPECT_EQ(result[0], expected_sum);
+  EXPECT_EQ(result[1], expected_count);
+
+  cudf::test::fixed_width_column_wrapper<int32_t> distinct{5, 1, 9};
+  EXPECT_TRUE(lto::make_hash_lookup_table(cudf::table_view{{distinct}}).unique());
+  cudf::test::fixed_width_column_wrapper<double> floating{1.0, 2.0};
+  EXPECT_THROW(lto::make_hash_lookup_table(cudf::table_view{{floating}}), std::invalid_argument);
+}
+
+TEST_F(LTOUDFTest, ExistenceLookups)
+{
+  auto const build_keys = random_values<int64_t>(5000, -2000, 50000, 120);
+  std::set<int64_t> const build(build_keys.begin(), build_keys.end());
+  cudf::test::fixed_width_column_wrapper<int64_t> key_column(build_keys.begin(), build_keys.end());
+
+  auto const stream = cudf::get_default_stream();
+  auto const set    = lto::make_key_set(key_column, stream);
+  auto const keys   = lto::make_hash_lookup_table(cudf::table_view{{key_column}}, false, stream);
+  EXPECT_EQ(set.num_rows(), static_cast<cudf::size_type>(build_keys.size()));
+  EXPECT_EQ(keys.view().num_groups, build.size());
+  EXPECT_EQ(keys.view().rows, nullptr);
+  struct {
+    cudf_lto_lookup set;
+    cudf_lto_hash_lookup keys;
+  } const host_data{set.view(), keys.view()};
+  rmm::device_buffer user_data(&host_data, sizeof(host_data), stream);
+
+  auto const probe      = random_values<int64_t>(3 * tile_rows + 5, -3000, 52000, 130);
+  int64_t expected_semi = 0;
+  for (auto const key : probe) {
+    expected_semi += build.count(key);
+  }
+  cudf::test::fixed_width_column_wrapper<int64_t> probe_column(probe.begin(), probe.end());
+  std::vector<packed> keep_alive{pack_lto(probe_column)};
+  std::vector<std::vector<cudf::experimental::packed_data_view>> partitions{{keep_alive[0].view()}};
+  auto const source = lto::make_packed_source(partitions, stream);
+  auto const program =
+    lto::udf{test_fragment(cudf_test_fragments::lto_exists_count), cudf::lto_binary_type::FATBIN};
+  auto const state =
+    lto::reduce(source, program, 4 * sizeof(int64_t), user_data.data(), {}, stream);
+  int64_t result[4];
+  ASSERT_EQ(cudaMemcpy(result, state.data(), sizeof(result), cudaMemcpyDeviceToHost), cudaSuccess);
+  auto const expected_anti = static_cast<int64_t>(probe.size()) - expected_semi;
+  EXPECT_EQ(result[0], expected_semi);
+  EXPECT_EQ(result[1], expected_anti);
+  EXPECT_EQ(result[2], expected_semi);
+  EXPECT_EQ(result[3], expected_anti);
+
+  cudf::test::fixed_width_column_wrapper<int32_t> all_null({1, 2}, {false, false});
+  EXPECT_EQ(lto::make_key_set(all_null).view().num_keys, 0u);
+  EXPECT_EQ(lto::make_hash_lookup_table(cudf::table_view{{all_null}}, false).view().num_groups, 0u);
 }
 
 TEST_F(LTOUDFTest, FilteredScanEmitsKeptRows)

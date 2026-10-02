@@ -45,6 +45,12 @@ __device__ inline void stage(cudf_lto_chunk_ref const chunk, unsigned char* dest
   }
 }
 
+/// Row `index` of `tile`, as passed to row programs.
+__device__ inline cudf_lto_row row_of(cudf_lto_tile const& tile, cudf_lto_u32 index)
+{
+  return cudf_lto_row{tile.columns, tile.first_row, index};
+}
+
 /// Block-cooperative: describes tile `t` in `tile` and stages its chunks at `smem`.
 __device__ inline void load_tile(cudf_lto_tile_source const& source,
                                  cudf_lto_u64 t,

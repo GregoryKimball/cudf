@@ -718,10 +718,20 @@ add_fragment(
 add_fragment(cudf_test_fragments FRAGMENT to_upper SOURCE transform/fragments/to_upper.cu)
 
 add_fragment(cudf_test_fragments FRAGMENT lto_for_bitpack SOURCE lto/fragments/for_bitpack.cu)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_for_bitpack_read SOURCE lto/fragments/for_bitpack_read.cu
+)
 
 add_fragment(cudf_test_fragments FRAGMENT lto_filtered_sum SOURCE lto/fragments/filtered_sum.cu)
 add_fragment(cudf_test_fragments FRAGMENT lto_grouped_sum SOURCE lto/fragments/grouped_sum.cu)
 add_fragment(cudf_test_fragments FRAGMENT lto_lookup_sum SOURCE lto/fragments/lookup_sum.cu)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_hash_grouped_sum SOURCE lto/fragments/hash_grouped_sum.cu
+)
+add_fragment(
+  cudf_test_fragments FRAGMENT lto_hash_lookup_sum SOURCE lto/fragments/hash_lookup_sum.cu
+)
+add_fragment(cudf_test_fragments FRAGMENT lto_exists_count SOURCE lto/fragments/exists_count.cu)
 add_fragment(
   cudf_test_fragments FRAGMENT lto_filtered_select SOURCE lto/fragments/filtered_select.cu
 )

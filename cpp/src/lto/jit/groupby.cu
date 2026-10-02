@@ -44,7 +44,8 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_BLOCK_SIZE)
       auto const row    = base + threadIdx.x;
       cudf_lto_u32 slot = CUDF_LTO_SKIP_ROW;
       if (row < tile.num_rows) {
-        slot = cudf_lto_groupby_row(args.user_data, &tile, row, row_state);
+        auto const current = cudf_lto_kernel::row_of(tile, row);
+        slot               = cudf_lto_groupby_row(args.user_data, &current, row_state);
         if (slot >= num_groups) { slot = CUDF_LTO_SKIP_ROW; }
       }
       auto const peers = __match_any_sync(0xffffffffU, slot);

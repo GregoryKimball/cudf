@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 /**
@@ -29,8 +30,9 @@
  * @brief LTO extensibility points: precompiled kernel fragments linked with caller fragments.
  *
  * Callers pass LTO-IR fragments whose UDFs implement the hooks declared in `cudf/lto/udf_abi.h`.
- * libcudf owns grids, tiling, shared-memory staging, output allocation, and merging; UDFs own
- * encodings, accessors, predicates, and aggregation state.
+ * libcudf owns grids, tiling, shared-memory staging, codec dispatch, output allocation, and
+ * merging. Codecs own encodings and their readers; row programs own predicates, lookups, and
+ * aggregation state, and read columns row by row through `cudf_lto_get`.
  */
 
 namespace CUDF_EXPORT cudf {
@@ -48,13 +50,17 @@ struct udf {
 /**
  * @brief A caller-defined chunk codec used by `pack_compression::lto` regions.
  *
- * The fragment defines the `cudf_lto_encode_chunk` and `cudf_lto_decode_chunk` UDFs.
+ * `binary` defines the `cudf_lto_encode_chunk` and `cudf_lto_decode_chunk` hooks. `reader`
+ * defines only the codec's chunk-relative reader, named `reader_symbol`, which libcudf links into
+ * every kernel that reads a column of this codec on behalf of a row program.
  */
 struct codec {
-  std::vector<uint8_t> binary;                    ///< Owned fragment bytes
-  lto_binary_type type{lto_binary_type::LTO_IR};  ///< Binary format of `binary`
+  std::vector<uint8_t> binary;                    ///< Owned encode and decode fragment bytes
+  lto_binary_type type{lto_binary_type::LTO_IR};  ///< Binary format of `binary` and `reader`
   /// Upper bound on encoded bytes for a chunk of the given raw size
   std::function<std::size_t(std::size_t)> max_encoded_bytes;
+  std::vector<uint8_t> reader;  ///< Owned reader fragment bytes
+  std::string reader_symbol;    ///< Unmangled name of the reader `reader` defines
 };
 
 /**
@@ -72,6 +78,8 @@ void register_codec(uint32_t id, codec codec);
  * @param id Codec id
  */
 [[nodiscard]] bool is_codec_registered(uint32_t id);
+
+struct hash_groupby_result;
 
 /**
  * @brief Row-aligned tiles over packed columns, prepared once for repeated reductions.
@@ -123,6 +131,15 @@ class packed_source {
                                        size_type,
                                        cuda::stream_ref,
                                        rmm::device_async_resource_ref);
+  friend hash_groupby_result hash_groupby(packed_source const&,
+                                          udf,
+                                          std::size_t,
+                                          std::size_t,
+                                          std::size_t,
+                                          void const*,
+                                          std::span<bool const>,
+                                          cuda::stream_ref,
+                                          rmm::device_async_resource_ref);
 };
 
 /**
@@ -191,6 +208,49 @@ rmm::device_buffer groupby(
   udf row_program,
   std::size_t num_groups,
   std::size_t state_bytes,
+  void const* user_data              = nullptr,
+  std::span<bool const> lazy_columns = {},
+  cuda::stream_ref stream            = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr  = cudf::get_current_device_resource_ref());
+
+/// Groups of a hash groupby, in unspecified order.
+struct hash_groupby_result {
+  std::unique_ptr<table> keys;  ///< One non-nullable INT64 column per key word
+  rmm::device_buffer states;    ///< One state per group, in the order of `keys`
+};
+
+/**
+ * @brief Groups every row of `source` by a key its caller row program computes, without
+ * unpacking.
+ *
+ * Like `groupby`, but the row program returns a key of `num_key_words` 64-bit words instead of a
+ * dense slot, and groups live in a global-memory hash table, so the number of groups is limited
+ * only by device memory. The kernel calls `cudf_lto_hash_groupby_row` once per row and merges the
+ * row's state into its key's group with `cudf_lto_reduce_merge`; groups start from
+ * `cudf_lto_reduce_init`. The table is sized for `expected_groups`; if more groups appear than it
+ * holds, the scan runs again with a larger table.
+ *
+ * @throws std::invalid_argument if `num_key_words` is not between 1 and `CUDF_LTO_MAX_KEY_WORDS`
+ * @throws std::overflow_error if there are more than `size_type` groups
+ *
+ * @param source Prepared tiles
+ * @param row_program Fragment defining the `cudf_lto_hash_groupby_row`, `cudf_lto_reduce_init`,
+ * and `cudf_lto_reduce_merge` UDFs
+ * @param num_key_words Words in every key
+ * @param state_bytes Size of one group's state, at most `CUDF_LTO_MAX_STATE_BYTES`
+ * @param expected_groups Estimate of the number of groups
+ * @param user_data Device-accessible pointer passed to every `cudf_lto_hash_groupby_row` call
+ * @param lazy_columns As for `reduce`
+ * @param stream Stream for the groupby
+ * @param mr Device memory for the returned keys and states
+ * @return The key and state of every group
+ */
+hash_groupby_result hash_groupby(
+  packed_source const& source,
+  udf row_program,
+  std::size_t num_key_words,
+  std::size_t state_bytes,
+  std::size_t expected_groups,
   void const* user_data              = nullptr,
   std::span<bool const> lazy_columns = {},
   cuda::stream_ref stream            = cudf::get_default_stream(),
@@ -275,6 +335,79 @@ class lookup_table {
  */
 lookup_table make_lookup_table(
   column_view const& keys,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Builds a dense set of integer `keys` for existence tests: the bitmap of a lookup without
+ * ranks or rows, so keys need not be unique.
+ *
+ * Row programs test membership with `cudf_lto_lookup_contains`. Null keys are skipped. Memory is
+ * about `(max - min) / 8` bytes.
+ *
+ * @throws std::invalid_argument if `keys` is not INT8, INT16, INT32, or INT64, or if their range
+ * exceeds 2^37
+ *
+ * @param keys Build keys
+ * @param stream Stream for building
+ * @param mr Device memory for the set
+ * @return The set; `num_rows()` counts the valid keys
+ */
+lookup_table make_key_set(
+  column_view const& keys,
+  cuda::stream_ref stream           = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
+
+/**
+ * @brief Hash map from composite integer build keys to build rows, for row programs.
+ *
+ * Owns the device memory behind a `cudf_lto_hash_lookup`; a caller copies `view()` into its row
+ * program's `user_data` and calls `cudf_lto_hash_find` or `cudf_lto_hash_contains`.
+ */
+class hash_lookup_table {
+ public:
+  /**
+   * @brief Takes ownership of the buffers `view` points into; made by `make_hash_lookup_table`.
+   *
+   * @param storage Device buffers backing `view`
+   * @param view The device view
+   * @param num_rows Build rows the lookup indexes
+   */
+  hash_lookup_table(std::vector<rmm::device_buffer> storage,
+                    cudf_lto_hash_lookup view,
+                    size_type num_rows);
+
+  [[nodiscard]] cudf_lto_hash_lookup const& view() const { return _view; }  ///< @return View
+  [[nodiscard]] size_type num_rows() const { return _num_rows; }  ///< @return Indexed rows
+  /// @return Whether every build key is distinct, so each group has one row
+  [[nodiscard]] bool unique() const { return _view.num_groups == static_cast<uint32_t>(_num_rows); }
+
+ private:
+  std::vector<rmm::device_buffer> _storage;
+  cudf_lto_hash_lookup _view;
+  size_type _num_rows;
+};
+
+/**
+ * @brief Builds a hash lookup over the rows of `keys`, whose columns form one composite key.
+ *
+ * Each key column is widened to one 64-bit key word. Rows with a null key are skipped. Build rows
+ * are grouped by key, so a row program iterates every build row matching a probe key; with
+ * `with_rows` false only the distinct keys are kept, for existence tests. Memory is about
+ * `8 * num_columns + 8` bytes per distinct key plus four bytes per row.
+ *
+ * @throws std::invalid_argument if `keys` has no columns or more than `CUDF_LTO_MAX_KEY_WORDS`, or
+ * a column is not INT8, INT16, INT32, or INT64
+ *
+ * @param keys Build key columns
+ * @param with_rows Whether to keep the build rows of each key
+ * @param stream Stream for building
+ * @param mr Device memory for the lookup
+ * @return The lookup
+ */
+hash_lookup_table make_hash_lookup_table(
+  table_view const& keys,
+  bool with_rows                    = true,
   cuda::stream_ref stream           = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr = cudf::get_current_device_resource_ref());
 

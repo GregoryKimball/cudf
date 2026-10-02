@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "for_bitpack.cuh"
+#include <cudf/lto/udf_abi.h>
 
-// SELECT SUM(c1), COUNT(*) WHERE c0 < *user_data, over FOR+bitpack tiles. c1 is read only for
-// rows that pass the predicate.
+// SELECT SUM(c1), COUNT(*) WHERE c0 < *user_data. c1 is read only for rows that pass the
+// predicate.
 struct filtered_sum_state {
   long long sum;
   long long count;
@@ -18,14 +18,13 @@ extern "C" __device__ void cudf_lto_reduce_init(void* state)
 }
 
 extern "C" __device__ void cudf_lto_reduce_row(void const* user_data,
-                                               cudf_lto_tile const* tile,
-                                               cudf_lto_u32 row,
+                                               cudf_lto_row const* row,
                                                void* state)
 {
   auto const threshold = *static_cast<long long const*>(user_data);
-  if (for_bitpack_get(tile->columns[0], row) < threshold) {
+  if (cudf_lto_get(row, 0) < threshold) {
     auto* const s = static_cast<filtered_sum_state*>(state);
-    s->sum += for_bitpack_get(tile->columns[1], row);
+    s->sum += cudf_lto_get(row, 1);
     s->count += 1;
   }
 }

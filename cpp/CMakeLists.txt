@@ -645,7 +645,7 @@ precompile_fixed_width_kernel_fragments()
 precompile_string_kernel_fragments()
 
 # Precompiled LTO kernel fragments, linked at runtime with caller fragments.
-foreach(KERNEL IN ITEMS encode decode reduce groupby select)
+foreach(KERNEL IN ITEMS encode decode reduce groupby hash_groupby select)
   add_fragment(
     cudf_fragments FRAGMENT lto_${KERNEL}_kernel SOURCE src/lto/jit/${KERNEL}.cu
   )

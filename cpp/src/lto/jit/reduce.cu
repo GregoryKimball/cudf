@@ -25,7 +25,8 @@ extern "C" __global__ void __launch_bounds__(CUDF_LTO_BLOCK_SIZE)
     cudf_lto_kernel::load_tile(args.source, t, smem, tile);
     __syncthreads();
     for (cudf_lto_u32 row = threadIdx.x; row < tile.num_rows; row += blockDim.x) {
-      cudf_lto_reduce_row(args.user_data, &tile, row, state);
+      auto const current = cudf_lto_kernel::row_of(tile, row);
+      cudf_lto_reduce_row(args.user_data, &current, state);
     }
     __syncthreads();
   }
