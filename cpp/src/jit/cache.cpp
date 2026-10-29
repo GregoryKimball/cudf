@@ -489,6 +489,56 @@ kernel_instance={}
   return fut.get();
 }
 
+rtcx::blob get_source_fragment(std::string const& name,
+                               std::string const& source,
+                               std::span<char const* const> header_include_names,
+                               std::span<char const* const> headers)
+{
+  CUDF_FUNC_RANGE();
+
+  auto& ctx        = cudf::get_context();
+  auto& cache      = ctx.rtcx_cache();
+  auto& bundle     = ctx.jit_bundle();
+  auto& properties = ctx.get_device_properties();
+  auto bundle_hash = bundle.get_hash();
+
+  auto spec = std::format(R"***(sourceFragment
+name={}
+binary_type=LTO_IR
+cuda_runtime={}
+cuda_driver={}
+arch={}
+bundle={}
+)***",
+                          name,
+                          properties.runtime_version,
+                          properties.driver_version,
+                          LTO_ARCHITECTURE,
+                          bundle_hash);
+
+  XXH3_state_t state;
+  XXH3_INITSTATE(&state);
+  XXH3_128bits_reset(&state);
+  hash(&state, spec);
+  hash(&state, "source: ");
+  hash(&state, source);
+  hash(&state, "header_include_names: ");
+  hash(&state, header_include_names);
+  hash(&state, "headers: ");
+  hash(&state, headers);
+
+  auto digest = XXH3_128bits_digest(&state);
+  auto key    = rtcx::hash128{digest.high64, digest.low64};
+
+  auto compile = [&] {
+    return compile_fragment(name.c_str(), source.c_str(), header_include_names, headers, {});
+  };
+
+  auto fut = cache.get_or_add_blob(key, rtcx::blob_compile_func::from_functor(compile));
+
+  return fut.get();
+}
+
 std::tuple<rtcx::library, rtcx::blob> link_library_uncached(
   char const* name,
   std::span<rtcx::file_fragment const> file_fragments,
