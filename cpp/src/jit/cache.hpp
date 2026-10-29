@@ -113,6 +113,23 @@ rtcx::blob get_kernel_fragment(std::string const& name,
  * @param memory_fragments Memory fragments to link
  * @param extra_options Additional linking options
  */
+/**
+ * @brief Compiles an in-memory CUDA source to an LTO-IR fragment, cached by the source text.
+ *
+ * The source is compiled with the JIT bundle's include directories, so it may include cuDF
+ * headers.
+ *
+ * @param name Debug name of the compilation unit
+ * @param source CUDA source to compile
+ * @param header_include_names Names of additional in-memory headers
+ * @param headers Contents of the additional in-memory headers
+ * @return The LTO-IR fragment
+ */
+rtcx::blob get_source_fragment(std::string const& name,
+                               std::string const& source,
+                               std::span<char const* const> header_include_names,
+                               std::span<char const* const> headers);
+
 kernel get_lto_linked_kernel(std::string const& name,
                              std::span<rtcx::file_fragment const> file_fragments,
                              std::span<rtcx::memory_fragment const> memory_fragments);

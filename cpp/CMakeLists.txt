@@ -1000,6 +1000,8 @@ add_library(
   src/lists/stream_compaction/apply_mask.cu
   src/lists/stream_compaction/distinct.cu
   src/lists/utilities.cu
+  src/lto/codecs/for_bitpack.cu
+  src/lto/filter_gather.cu
   src/merge/merge.cu
   src/partitioning/partitioning.cu
   src/partitioning/round_robin.cu
