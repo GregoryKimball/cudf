@@ -42,8 +42,19 @@ struct header {
 /// Decodes the value of `row` as a 64-bit integer.
 __device__ inline long long decode(unsigned char const* data, long long row)
 {
-  auto const* h    = reinterpret_cast<header const*>(data);
-  auto const block = row / h->block_size;
+  auto const* h = reinterpret_cast<header const*>(data);
+  // Rows of a column fit in 32 bits; power-of-two block sizes, the common case, avoid a division.
+  auto const r          = static_cast<unsigned>(row);
+  auto const block_size = static_cast<unsigned>(h->block_size);
+  unsigned block, offset;
+  if ((block_size & (block_size - 1)) == 0) {
+    auto const shift = static_cast<unsigned>(__ffs(block_size) - 1);
+    block            = r >> shift;
+    offset           = r & (block_size - 1);
+  } else {
+    block  = r / block_size;
+    offset = r - block * block_size;
+  }
   auto const reference =
     reinterpret_cast<unsigned long long const*>(data + h->references_offset)[block];
   auto const width = static_cast<unsigned>(data[h->widths_offset + block]);
@@ -51,7 +62,7 @@ __device__ inline long long decode(unsigned char const* data, long long row)
 
   auto const* words = reinterpret_cast<unsigned long long const*>(data + h->words_offset) +
                       reinterpret_cast<long long const*>(data + h->word_offsets_offset)[block];
-  auto const bit   = static_cast<unsigned long long>(row - block * h->block_size) * width;
+  auto const bit   = static_cast<unsigned long long>(offset) * width;
   auto const word  = bit >> 6;
   auto const shift = static_cast<unsigned>(bit & 63);
 

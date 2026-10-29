@@ -135,6 +135,10 @@ ConfigureNVBench(NDSH_Q10_NVBENCH ndsh/q10.cpp ndsh/utilities.cpp)
 ConfigureNVBench(FILTER_NVBENCH filter/minmax_filter.cpp)
 
 # ##################################################################################################
+# * lto benchmark ---------------------------------------------------------------------------------
+ConfigureNVBench(LTO_NVBENCH lto/filter_gather.cu)
+
+# ##################################################################################################
 # * stream_compaction benchmark -------------------------------------------------------------------
 ConfigureNVBench(
   STREAM_COMPACTION_NVBENCH
