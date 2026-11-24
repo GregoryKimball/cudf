@@ -387,12 +387,14 @@ ConfigureNVBench(CUDFTABLE_READER_NVBENCH io/cudftable/cudftable_reader.cpp)
 ConfigureNVBench(CUDFTABLE_WRITER_NVBENCH io/cudftable/cudftable_writer.cpp)
 
 # ##################################################################################################
-# * parquet vs cudftable vs feather benchmarks
+# * feather reader benchmark
 # --------------------------------------------------------------------------
-ConfigureNVBench(
-  FORMAT_COMPARISON_NVBENCH io/format_comparison/format_reader.cpp
-  io/format_comparison/format_writer.cpp
-)
+ConfigureNVBench(FEATHER_READER_NVBENCH io/feather/feather_reader.cpp)
+
+# ##################################################################################################
+# * feather writer benchmark
+# --------------------------------------------------------------------------
+ConfigureNVBench(FEATHER_WRITER_NVBENCH io/feather/feather_writer.cpp)
 
 # ##################################################################################################
 # * orc reader benchmark --------------------------------------------------------------------------
