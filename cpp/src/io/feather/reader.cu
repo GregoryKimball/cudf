@@ -165,7 +165,7 @@ void batched_decompress(nvcomp::compression_type type,
                  std::string{"Feather "} + codec_name +
                    " chunk output offset does not meet nvCOMP alignment requirements");
     if (not is_aligned(task.src)) {
-      staging_size = cudf::util::round_up_safe(staging_size, alignment) + task.src_size;
+      staging_size = cudf::detail::round_up_safe(staging_size, alignment) + task.src_size;
     }
   }
   rmm::device_buffer staging(staging_size, stream, temp_mr);
@@ -173,7 +173,7 @@ void batched_decompress(nvcomp::compression_type type,
   std::size_t staging_offset = 0;
   for (auto& task : tasks) {
     if (is_aligned(task.src)) { continue; }
-    staging_offset = cudf::util::round_up_safe(staging_offset, alignment);
+    staging_offset = cudf::detail::round_up_safe(staging_offset, alignment);
     auto const dst = static_cast<uint8_t*>(staging.data()) + staging_offset;
     restage.push_back({task.src, dst, task.src_size});
     task.src = dst;
@@ -225,12 +225,12 @@ cuda::device_buffer<bitmask_type> make_mask_buffer(size_type num_rows,
                                                    cuda::stream_ref stream,
                                                    rmm::device_async_resource_ref mr)
 {
-  CUDF_EXPECTS(decoded_bytes >= static_cast<std::size_t>(cudf::util::div_rounding_up_safe(
+  CUDF_EXPECTS(decoded_bytes >= static_cast<std::size_t>(cudf::detail::div_rounding_up_safe(
                                   static_cast<int64_t>(num_rows), int64_t{8})),
                "Feather bitmap buffer is too small");
   auto const words =
     std::max(bitmask_allocation_size_bytes(num_rows) / sizeof(bitmask_type),
-             cudf::util::div_rounding_up_safe(decoded_bytes, sizeof(bitmask_type)));
+             cudf::detail::div_rounding_up_safe(decoded_bytes, sizeof(bitmask_type)));
   return cuda::device_buffer<bitmask_type>(stream, mr, words, cuda::no_init);
 }
 
@@ -281,7 +281,7 @@ table_with_metadata read_feather(datasource* source,
 {
   auto const file_size     = source->size();
   auto const trailer_size  = sizeof(int32_t) + file_magic_size;
-  auto const leading_magic = cudf::util::round_up_safe(file_magic_size, ipc_alignment);
+  auto const leading_magic = cudf::detail::round_up_safe(file_magic_size, ipc_alignment);
   CUDF_EXPECTS(file_size >= leading_magic + trailer_size, "File too small to be a Feather file");
 
   auto const trailer = source->host_read(file_size - trailer_size, trailer_size);
