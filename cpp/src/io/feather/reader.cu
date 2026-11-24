@@ -193,7 +193,9 @@ void batched_decompress(nvcomp::compression_type type,
   }
   auto const d_inputs  = cudf::detail::make_device_uvector_async(inputs, stream, temp_mr);
   auto const d_outputs = cudf::detail::make_device_uvector_async(outputs, stream, temp_mr);
-  rmm::device_uvector<codec_exec_result> d_results(tasks.size(), stream, temp_mr);
+  // nvCOMP leaves results that are already SKIPPED untouched, so they must be initialized
+  std::vector<codec_exec_result> const initial_results(tasks.size(), {0, codec_status::FAILURE});
+  auto d_results = cudf::detail::make_device_uvector_async(initial_results, stream, temp_mr);
 
   nvcomp::batched_decompress(
     type, d_inputs, d_outputs, d_results, max_chunk_size, total_size, stream, mr);

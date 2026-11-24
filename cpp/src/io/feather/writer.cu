@@ -148,7 +148,9 @@ std::vector<std::size_t> compress_chunks(std::vector<source_buffer> const& buffe
   }
   auto const d_inputs  = cudf::detail::make_device_uvector_async(inputs, stream, temp_mr);
   auto const d_outputs = cudf::detail::make_device_uvector_async(outputs, stream, temp_mr);
-  rmm::device_uvector<codec_exec_result> d_results(chunks.size(), stream, temp_mr);
+  // nvCOMP leaves results that are already SKIPPED untouched, so they must be initialized
+  std::vector<codec_exec_result> const initial_results(chunks.size(), {0, codec_status::FAILURE});
+  auto d_results = cudf::detail::make_device_uvector_async(initial_results, stream, temp_mr);
   nvcomp::batched_compress(type, d_inputs, d_outputs, d_results, stream, mr);
 
   auto const results = cudf::detail::make_host_vector(d_results, stream);
