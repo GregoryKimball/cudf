@@ -1097,10 +1097,24 @@ path : string
     File path
 columns : list, default=None
     If not None, only these columns will be read from the file.
+storage_options : dict, optional, default None
+    Extra options for a particular storage connection, such as host, port,
+    username or password.
+filesystem : fsspec.AbstractFileSystem, default None
+    Filesystem object to use when reading the data.
+**kwargs
+    Additional arguments are passed to ``pyarrow.feather.read_table`` and
+    force the CPU path.
 
 Returns
 -------
 DataFrame
+
+Notes
+-----
+Files are decoded on the GPU. Dictionary-encoded or nested columns, and LZ4
+frames with linked blocks (which PyArrow writes for buffers larger than
+64 KiB), are not supported on the GPU and fall back to PyArrow with a warning.
 
 Examples
 --------
@@ -1132,6 +1146,24 @@ Parameters
 ----------
 path : str
     File path
+compression : {{"lz4", "zstd", "uncompressed", None}}, default None
+    Buffer compression codec. None selects LZ4, matching PyArrow.
+compression_level : int, default None
+    Codec level. Setting it forces the CPU (PyArrow) path.
+chunksize : int, default None
+    Maximum number of rows in each record batch. None writes one batch.
+version : int, default 2
+    Feather file version. Version 1 forces the CPU (PyArrow) path.
+storage_options : dict, optional, default None
+    Extra options for a particular storage connection, such as host, port,
+    username or password.
+filesystem : fsspec.AbstractFileSystem, default None
+    Filesystem object to use when writing the data.
+
+Notes
+-----
+Files are encoded on the GPU. Categorical, interval, list and struct columns
+fall back to PyArrow with a warning. The index is not written.
 
 See Also
 --------

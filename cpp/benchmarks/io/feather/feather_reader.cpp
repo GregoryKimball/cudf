@@ -148,7 +148,7 @@ NVBENCH_BENCH_TYPES(BM_feather_read_num_columns,
   .set_name("feather_read_num_columns")
   .set_type_axes_names({"data_type"})
   .add_string_axis("io_type", {"DEVICE_BUFFER"})
-  .add_string_axis("compression_type", {"NONE"})
+  .add_string_axis("compression_type", {"NONE", "LZ4", "ZSTD"})
   .set_min_samples(4)
   .add_int64_axis("data_size", {128 << 20})
   .add_int64_power_of_two_axis("num_cols", nvbench::range(0, 12, 2));  // 1 to 4096
