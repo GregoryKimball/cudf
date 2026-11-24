@@ -806,6 +806,9 @@ add_library(
   src/io/csv/writer_impl.cu
   src/io/functions.cpp
   src/io/cudftable.cpp
+  src/io/feather/feather_host.cpp
+  src/io/feather/reader.cu
+  src/io/feather/writer.cu
   src/io/json/host_tree_algorithms.cu
   src/io/json/json_column.cu
   src/io/json/column_tree_construction.cu
