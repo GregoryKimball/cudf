@@ -317,7 +317,7 @@ namespace {
 
 using FlatBufferBuilder = flatbuffers::FlatBufferBuilder;
 
-inline constexpr uint8_t lz4_block_size_id = 6;
+inline constexpr uint8_t lz4_block_size_id = 4;
 static_assert(lz4_block_max_size(lz4_block_size_id) == compression_chunk_size);
 
 inline constexpr uint8_t lz4_frame_flg = lz4_flg_version | lz4_flg_block_indep;

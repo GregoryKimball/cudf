@@ -353,9 +353,12 @@ table_with_metadata read_feather(datasource* source,
     auto const body_size     = static_cast<std::size_t>(block->bodyLength());
     uint8_t const* host_body = nullptr;
     auto& device_body        = device_bodies.emplace_back(body_size, stream, mr.get_temporary_mr());
-    if (not codec.has_value() and source->is_device_read_preferred(body_size)) {
+    if (source->is_device_read_preferred(body_size)) {
       source->device_read(
         body_offset, body_size, static_cast<uint8_t*>(device_body.data()), stream);
+      if (codec.has_value()) {
+        host_body = host_bodies.emplace_back(source->host_read(body_offset, body_size))->data();
+      }
     } else {
       auto& body = host_bodies.emplace_back(source->host_read(body_offset, body_size));
       host_body  = body->data();

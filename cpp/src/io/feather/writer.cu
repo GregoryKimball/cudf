@@ -232,26 +232,41 @@ encoded_body encode_body(std::vector<source_buffer> const& buffers,
     copy_sizes.push_back(copy.size);
   }
   batched_copy(srcs, dsts, copy_sizes, stream, mr);
+
+  // Frame and block headers depend on the compressed sizes; write them into the body on the device
+  std::vector<uint8_t> patch_bytes;
+  for (auto const& patch : plan.patches) {
+    auto const value = reinterpret_cast<uint8_t const*>(&patch.value);
+    patch_bytes.insert(patch_bytes.end(), value, value + patch.width);
+  }
+  auto const d_patch_bytes =
+    cudf::detail::make_device_uvector_async(patch_bytes, stream, mr.get_temporary_mr());
+  srcs.clear();
+  dsts.clear();
+  copy_sizes.clear();
+  std::size_t patch_offset = 0;
+  for (auto const& patch : plan.patches) {
+    srcs.push_back(d_patch_bytes.data() + patch_offset);
+    dsts.push_back(static_cast<uint8_t*>(body.data()) + patch.offset);
+    copy_sizes.push_back(patch.width);
+    patch_offset += patch.width;
+  }
+  batched_copy(srcs, dsts, copy_sizes, stream, mr);
+  plan.patches.clear();
   stream.sync();
   return {std::move(plan), std::move(body)};
 }
 
-/**
- * @brief Writes an encoded body to the sink, applying host-side header patches.
- */
 void write_body(data_sink* sink, encoded_body const& body, cuda::stream_ref stream)
 {
   auto const size = body.data.size();
   if (size == 0) { return; }
-  if (body.plan.patches.empty() and sink->is_device_write_preferred(size)) {
+  if (sink->is_device_write_preferred(size)) {
     sink->device_write(body.data.data(), size, stream);
     return;
   }
-  auto host = cudf::detail::make_host_vector(
+  auto const host = cudf::detail::make_host_vector(
     device_span<uint8_t const>{static_cast<uint8_t const*>(body.data.data()), size}, stream);
-  for (auto const& patch : body.plan.patches) {
-    std::memcpy(host.data() + patch.offset, &patch.value, patch.width);
-  }
   sink->host_write(host.data(), size);
 }
 

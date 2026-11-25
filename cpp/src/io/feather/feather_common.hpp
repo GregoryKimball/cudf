@@ -216,8 +216,9 @@ std::vector<frame_chunk> parse_lz4_frame(std::span<uint8_t const> frame, std::si
 std::vector<frame_chunk> parse_zstd_frames(std::span<uint8_t const> frames,
                                            std::size_t decoded_size);
 
-/// Size of the chunks the writer splits each buffer into for compression
-inline constexpr std::size_t compression_chunk_size = std::size_t{1} << 20;
+/// Size of the chunks the writer splits each buffer into for compression; nvCOMP needs many
+/// small chunks to fill the GPU
+inline constexpr std::size_t compression_chunk_size = std::size_t{64} << 10;
 
 /**
  * @brief A column to be written.
