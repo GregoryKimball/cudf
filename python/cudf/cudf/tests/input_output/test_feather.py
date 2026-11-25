@@ -104,6 +104,18 @@ def _nullable_pdf(nrows):
     )
 
 
+def _cpu_read(fname):
+    # Ignores the pandas metadata, which would restore pandas nullable dtypes
+    return cudf.DataFrame.from_arrow(pa.ipc.open_file(fname).read_all())
+
+
+def _nullable_gdf(nrows):
+    # Via Arrow, so that the frame does not remember the pandas nullable dtypes
+    return cudf.DataFrame.from_arrow(
+        pa.Table.from_pandas(_nullable_pdf(nrows), preserve_index=False)
+    )
+
+
 @contextmanager
 def _no_cpu_fallback():
     with warnings.catch_warnings():
@@ -125,7 +137,7 @@ def test_feather_pandas_writer_cudf_reader(tmp_path, compression, chunksize):
     with _no_cpu_fallback():
         got = cudf.read_feather(fname)
 
-    assert_eq(cudf.from_pandas(pdf), got)
+    assert_eq(_cpu_read(fname), got)
 
 
 def test_feather_pandas_writer_cudf_reader_columns(tmp_path):
@@ -137,7 +149,7 @@ def test_feather_pandas_writer_cudf_reader_columns(tmp_path):
     with _no_cpu_fallback():
         got = cudf.read_feather(fname, columns=columns)
 
-    assert_eq(cudf.from_pandas(pdf[columns]), got)
+    assert_eq(_cpu_read(fname)[columns], got)
 
 
 def test_feather_pandas_writer_cudf_reader_linked_lz4_fallback(tmp_path):
@@ -148,25 +160,24 @@ def test_feather_pandas_writer_cudf_reader_linked_lz4_fallback(tmp_path):
     with pytest.warns(UserWarning, match="linked blocks"):
         got = cudf.read_feather(fname)
 
-    assert_eq(cudf.from_pandas(pdf), got)
+    assert_eq(_cpu_read(fname), got)
 
 
 @pytest.mark.parametrize("compression", [None, "lz4", "zstd", "uncompressed"])
 @pytest.mark.parametrize("chunksize", [None, 30_000])
 def test_feather_cudf_writer_pandas_reader(tmp_path, compression, chunksize):
-    gdf = cudf.from_pandas(_nullable_pdf(100_000))
+    gdf = _nullable_gdf(100_000)
     fname = tmp_path / "cudf.feather"
 
     with _no_cpu_fallback():
         gdf.to_feather(fname, compression=compression, chunksize=chunksize)
 
-    got = pd.read_feather(fname, dtype_backend="numpy_nullable")
-    assert_eq(gdf.to_pandas(nullable=True), got)
+    assert_eq(gdf.to_pandas(), pd.read_feather(fname))
 
 
 @pytest.mark.parametrize("compression", [None, "zstd", "uncompressed"])
 def test_feather_cudf_writer_cudf_reader(tmp_path, compression):
-    gdf = cudf.from_pandas(_nullable_pdf(100_000))
+    gdf = _nullable_gdf(100_000)
     fname = tmp_path / "cudf.feather"
 
     with _no_cpu_fallback():
