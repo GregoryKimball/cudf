@@ -81,30 +81,25 @@ def test_feather_writer(tmp_path, pdf):
 def _nullable_pdf(nrows):
     rng = np.random.default_rng(seed=0)
     nulls = rng.random(nrows) < 0.1
+
+    def masked(values, dtype):
+        return pd.Series(values, dtype=dtype).mask(nulls)
+
     return pd.DataFrame(
         {
-            "int8": pd.array(
-                rng.integers(-100, 100, nrows), dtype="Int8"
-            ).where(~nulls),
-            "int64": pd.array(
+            "int8": masked(rng.integers(-100, 100, nrows), "Int8"),
+            "int64": pd.Series(
                 rng.integers(-(2**40), 2**40, nrows), dtype="Int64"
             ),
-            "uint32": pd.array(
-                rng.integers(0, 2**32 - 1, nrows), dtype="UInt32"
-            ).where(~nulls),
-            "float64": pd.array(rng.random(nrows), dtype="Float64").where(
-                ~nulls
+            "uint32": masked(rng.integers(0, 2**32 - 1, nrows), "UInt32"),
+            "float64": masked(rng.random(nrows), "Float64"),
+            "bool": masked(rng.random(nrows) > 0.5, "boolean"),
+            "string": masked(
+                [f"s{i % 1000}" * (i % 5) for i in range(nrows)], "string"
             ),
-            "bool": pd.array(rng.random(nrows) > 0.5, dtype="boolean").where(
-                ~nulls
+            "timestamp": masked(
+                rng.integers(0, 2**40, nrows).astype("datetime64[ms]"), None
             ),
-            "string": pd.array(
-                [f"s{i % 1000}" * (i % 5) for i in range(nrows)],
-                dtype="string",
-            ).where(~nulls),
-            "timestamp": pd.Series(
-                rng.integers(0, 2**40, nrows).astype("datetime64[ms]")
-            ).where(~nulls),
         }
     )
 

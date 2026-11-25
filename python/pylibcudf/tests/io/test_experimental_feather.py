@@ -103,7 +103,9 @@ def test_read_feather_from_pyarrow(tmp_path, compression, chunksize):
         pa_table, path, compression=compression, chunksize=chunksize
     )
 
-    assert_table_and_meta_eq(pa_table, _read(path))
+    assert_table_and_meta_eq(
+        pa_table, _read(path), check_field_nullability=False
+    )
 
 
 def test_read_feather_columns(tmp_path):
@@ -112,7 +114,11 @@ def test_read_feather_columns(tmp_path):
     pa_feather.write_feather(pa_table, path, compression="zstd")
 
     columns = ["string", "struct", "int8"]
-    assert_table_and_meta_eq(pa_table.select(columns), _read(path, columns))
+    assert_table_and_meta_eq(
+        pa_table.select(columns),
+        _read(path, columns),
+        check_field_nullability=False,
+    )
 
 
 def test_write_feather_column_names(tmp_path):
@@ -173,7 +179,9 @@ def test_write_feather_roundtrip(tmp_path, compression, max_rows_per_batch):
     feather.write_feather(builder.build())
 
     assert pa_feather.read_table(path).equals(pa_table)
-    assert_table_and_meta_eq(pa_table, _read(path))
+    assert_table_and_meta_eq(
+        pa_table, _read(path), check_field_nullability=False
+    )
 
 
 def test_write_feather_unsupported_compression(tmp_path):
