@@ -80,7 +80,9 @@ std::vector<column_view> arrow_children(column_view const& col, cuda::stream_ref
       structs_column_view const structs(col);
       std::vector<column_view> children;
       for (size_type i = 0; i < structs.num_children(); ++i) {
-        children.push_back(structs.get_sliced_child(i, stream));
+        // Slicing recounts the child's nulls, which an unsliced struct's children already know
+        auto const unsliced = col.offset() == 0 && structs.child(i).size() == col.size();
+        children.push_back(unsliced ? structs.child(i) : structs.get_sliced_child(i, stream));
       }
       return children;
     }
