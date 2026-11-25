@@ -265,8 +265,9 @@ void write_body(data_sink* sink, encoded_body const& body, cuda::stream_ref stre
     sink->device_write(body.data.data(), size, stream);
     return;
   }
-  auto const host = cudf::detail::make_host_vector(
+  auto const host = cudf::detail::make_pinned_vector_async(
     device_span<uint8_t const>{static_cast<uint8_t const*>(body.data.data()), size}, stream);
+  stream.sync();
   sink->host_write(host.data(), size);
 }
 

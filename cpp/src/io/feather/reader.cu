@@ -308,6 +308,7 @@ table_with_metadata read_feather(datasource* source,
     num_batches > 1 ? cudf::memory_resources{mr.get_temporary_mr(), mr.get_temporary_mr()} : mr;
 
   std::vector<std::unique_ptr<datasource::buffer>> host_bodies;
+  std::vector<cudf::detail::host_vector<uint8_t>> pinned_bodies;
   std::vector<rmm::device_buffer> device_bodies;
   std::vector<std::vector<batch_column>> batches;
   decode_plan plan;
@@ -357,7 +358,14 @@ table_with_metadata read_feather(datasource* source,
       source->device_read(
         body_offset, body_size, static_cast<uint8_t*>(device_body.data()), stream);
       if (codec.has_value()) {
-        host_body = host_bodies.emplace_back(source->host_read(body_offset, body_size))->data();
+        // Pageable device-to-host copies are several times slower than pinned ones
+        host_body = pinned_bodies
+                      .emplace_back(cudf::detail::make_pinned_vector_async(
+                        device_span<uint8_t const>{static_cast<uint8_t const*>(device_body.data()),
+                                                   body_size},
+                        stream))
+                      .data();
+        stream.sync();
       }
     } else {
       auto& body = host_bodies.emplace_back(source->host_read(body_offset, body_size));
