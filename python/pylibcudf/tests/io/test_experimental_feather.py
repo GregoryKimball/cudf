@@ -108,6 +108,52 @@ def test_read_feather_from_pyarrow(tmp_path, compression, chunksize):
     )
 
 
+@pytest.mark.parametrize("compression", ["uncompressed", "zstd"])
+def test_read_feather_struct_nulls_cover_children(tmp_path, compression):
+    # Arrow lets struct children hold valid values under null parents, which cudf does not
+    num_rows = 1000
+    rng = np.random.default_rng(seed=1)
+    outer_valid = rng.random(num_rows) > 0.3
+    inner_valid = rng.random(num_rows) > 0.3
+    inner = pa.StructArray.from_arrays(
+        [
+            pa.array(np.arange(num_rows, dtype=np.int32)),
+            pa.array([f"s{i}" * (i % 5) for i in range(num_rows)]),
+        ],
+        names=["x", "y"],
+        mask=pa.array(~inner_valid),
+    )
+    outer = pa.StructArray.from_arrays(
+        [inner, pa.array([f"z{i}" for i in range(num_rows)])],
+        names=["inner", "z"],
+        mask=pa.array(~outer_valid),
+    )
+    path = tmp_path / "in.feather"
+    pa_feather.write_feather(
+        pa.table({"s": outer}), path, compression=compression
+    )
+
+    (col,) = _read(path).columns
+    inner_col, z_col = col.children()
+    x_col, y_col = inner_col.children()
+    expected_inner, expected_z = outer.flatten()
+    expected_x, expected_y = expected_inner.flatten()
+    assert (
+        pa.array(inner_col.to_arrow()).is_null().to_pylist()
+        == expected_inner.is_null().to_pylist()
+    )
+    for result, expected in [
+        (z_col, expected_z),
+        (x_col, expected_x),
+        (y_col, expected_y),
+    ]:
+        assert pa.array(result.to_arrow()).to_pylist() == expected.to_pylist()
+    # Strings under null parents must be empty in cudf
+    y_offsets = pa.array(y_col.children()[0].to_arrow()).to_numpy()
+    y_sizes = np.diff(y_offsets)
+    assert (y_sizes[~(outer_valid & inner_valid)] == 0).all()
+
+
 def test_read_feather_columns(tmp_path):
     pa_table = _make_table(1000)
     path = tmp_path / "in.feather"

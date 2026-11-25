@@ -10,6 +10,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/concatenate.hpp>
 #include <cudf/detail/copy.hpp>
+#include <cudf/detail/structs/utilities.hpp>
 #include <cudf/detail/transform.hpp>
 #include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
@@ -352,8 +353,15 @@ std::unique_ptr<column> make_empty(column_spec const& spec,
   }
 }
 
+/**
+ * @brief Builds a column from its decoded buffers.
+ *
+ * @param apply_struct_nulls Whether a struct column superimposes its nulls onto its descendants;
+ * otherwise the caller must enforce null consistency on the outermost struct
+ */
 std::unique_ptr<column> make_column(column_spec const& spec,
                                     batch_column&& buffers,
+                                    bool apply_struct_nulls,
                                     cuda::stream_ref stream,
                                     cudf::memory_resources mr)
 {
@@ -371,7 +379,7 @@ std::unique_ptr<column> make_column(column_spec const& spec,
         std::move(*buffers.values),
         cuda::device_buffer<bitmask_type>(stream, mr.get_output_mr(), 0, cuda::no_init),
         0);
-      auto child = make_column(spec.children[0], std::move(buffers.children[0]), stream, mr);
+      auto child = make_column(spec.children[0], std::move(buffers.children[0]), true, stream, mr);
       auto col   = make_lists_column(
         num_rows, std::move(offsets), std::move(child), buffers.null_count, std::move(null_mask));
       // Arrow allows null lists to cover child elements, which cudf does not
@@ -384,11 +392,18 @@ std::unique_ptr<column> make_column(column_spec const& spec,
       std::vector<std::unique_ptr<column>> children;
       for (std::size_t i = 0; i < spec.children.size(); ++i) {
         children.push_back(
-          make_column(spec.children[i], std::move(buffers.children[i]), stream, mr));
+          make_column(spec.children[i], std::move(buffers.children[i]), false, stream, mr));
       }
-      // Superimposes the struct's nulls onto its children
-      return make_structs_column(
-        num_rows, std::move(children), buffers.null_count, std::move(null_mask), stream, mr);
+      if (apply_struct_nulls) {
+        return make_structs_column(
+          num_rows, std::move(children), buffers.null_count, std::move(null_mask), stream, mr);
+      }
+      return std::make_unique<column>(data_type{type_id::STRUCT},
+                                      num_rows,
+                                      rmm::device_buffer{},
+                                      std::move(null_mask),
+                                      buffers.null_count,
+                                      std::move(children));
     }
     case arrow_layout::FIXED_WIDTH:
       return std::make_unique<column>(
@@ -566,7 +581,7 @@ table_with_metadata read_feather(datasource* source,
     }
     std::vector<std::unique_ptr<column>> pieces;
     for (auto& batch : batches) {
-      pieces.push_back(make_column(specs[c], std::move(batch[c]), stream, batch_mr));
+      pieces.push_back(make_column(specs[c], std::move(batch[c]), false, stream, batch_mr));
     }
     if (pieces.size() == 1) {
       output.push_back(std::move(pieces.front()));
@@ -578,6 +593,7 @@ table_with_metadata read_feather(datasource* source,
     });
     output.push_back(cudf::detail::concatenate(views, stream, mr));
   }
+  output = cudf::structs::detail::enforce_null_consistency(std::move(output), stream, mr);
   metadata.num_rows_per_source = {static_cast<std::size_t>(total_rows)};
 
   // Host bodies and staging buffers must outlive the copies enqueued above
