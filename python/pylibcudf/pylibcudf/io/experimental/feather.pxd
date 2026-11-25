@@ -19,6 +19,7 @@ cdef class FeatherWriterOptions:
     cdef Table table
     cdef SinkInfo sink
     cpdef void set_column_names(self, list names)
+    cpdef void set_column_metadata(self, list column_names)
     cpdef void set_compression(self, compression_type compression)
     cpdef void set_max_rows_per_batch(self, size_type rows)
 
@@ -27,6 +28,7 @@ cdef class FeatherWriterOptionsBuilder:
     cdef Table table
     cdef SinkInfo sink
     cpdef FeatherWriterOptionsBuilder column_names(self, list names)
+    cpdef FeatherWriterOptionsBuilder column_metadata(self, list column_names)
     cpdef FeatherWriterOptionsBuilder compression(self, compression_type compression)
     cpdef FeatherWriterOptionsBuilder max_rows_per_batch(self, size_type rows)
     cpdef FeatherWriterOptions build(self)

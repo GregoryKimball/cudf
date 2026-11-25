@@ -50,6 +50,7 @@ class feather_writer_options {
   sink_info _sink;
   table_view _table;
   std::vector<std::string> _column_names;
+  std::vector<column_name_info> _column_metadata;
   compression_type _compression = compression_type::LZ4;
   size_type _max_rows_per_batch = std::numeric_limits<size_type>::max();
 
@@ -92,13 +93,24 @@ class feather_writer_options {
   [[nodiscard]] table_view const& get_table() const noexcept { return _table; }
 
   /**
-   * @brief Returns the column names; empty means names are generated as "_col<index>".
+   * @brief Returns the column names; empty means columns are named by their index.
    *
    * @return Column names
    */
   [[nodiscard]] std::vector<std::string> const& get_column_names() const noexcept
   {
     return _column_names;
+  }
+
+  /**
+   * @brief Returns the names of the columns and their children; takes precedence over the column
+   * names when not empty.
+   *
+   * @return Column name hierarchy, one entry per column
+   */
+  [[nodiscard]] std::vector<column_name_info> const& get_column_metadata() const noexcept
+  {
+    return _column_metadata;
   }
 
   /**
@@ -128,6 +140,20 @@ class feather_writer_options {
    * @param names One name per column in the table
    */
   void set_column_names(std::vector<std::string> names) { _column_names = std::move(names); }
+
+  /**
+   * @brief Sets the names of the columns and their children.
+   *
+   * Struct children are named by the entries of `children`; a list's entry holds the offsets
+   * name followed by the child's names, as in the `table_metadata` returned by readers. Missing
+   * child names default to the child index for struct fields and to "item" for list elements.
+   *
+   * @param metadata One entry per column in the table
+   */
+  void set_column_metadata(std::vector<column_name_info> metadata)
+  {
+    _column_metadata = std::move(metadata);
+  }
 
   /**
    * @brief Sets the buffer compression codec.
@@ -173,6 +199,19 @@ class feather_writer_options_builder {
   feather_writer_options_builder& column_names(std::vector<std::string> names)
   {
     _options.set_column_names(std::move(names));
+    return *this;
+  }
+
+  /**
+   * @brief Sets the names of the columns and their children.
+   *
+   * @param metadata One entry per column in the table; see
+   * `feather_writer_options::set_column_metadata`
+   * @return this for chaining
+   */
+  feather_writer_options_builder& column_metadata(std::vector<column_name_info> metadata)
+  {
+    _options.set_column_metadata(std::move(metadata));
     return *this;
   }
 

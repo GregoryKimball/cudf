@@ -24,6 +24,9 @@ cdef extern from "cudf/io/experimental/feather.hpp" \
         size_type get_max_rows_per_batch() except +libcudf_exception_handler
 
         void set_column_names(vector[string] names) except +libcudf_exception_handler
+        void set_column_metadata(
+            vector[cudf_io_types.column_name_info] metadata
+        ) except +libcudf_exception_handler
         void set_compression(
             cudf_io_types.compression_type compression
         ) except +libcudf_exception_handler
@@ -38,6 +41,9 @@ cdef extern from "cudf/io/experimental/feather.hpp" \
     cdef cppclass feather_writer_options_builder:
         feather_writer_options_builder& column_names(
             vector[string] names
+        ) except +libcudf_exception_handler
+        feather_writer_options_builder& column_metadata(
+            vector[cudf_io_types.column_name_info] metadata
         ) except +libcudf_exception_handler
         feather_writer_options_builder& compression(
             cudf_io_types.compression_type compression

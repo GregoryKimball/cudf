@@ -64,7 +64,9 @@ void BM_feather_write_data_common(nvbench::state& state,
                                   data_profile const& profile,
                                   nvbench::type_list<nvbench::enum_type<DataType>>)
 {
-  auto const d_type    = get_type_or_group(static_cast<int32_t>(DataType));
+  auto d_type = get_type_or_group(static_cast<int32_t>(DataType));
+  // Arrow durations have no day unit
+  std::erase(d_type, cudf::type_id::DURATION_DAYS);
   auto const sink_type = retrieve_io_type_enum(state.get_string("io_type"));
   auto const data_size = static_cast<size_t>(state.get_int64("data_size"));
 
@@ -99,14 +101,15 @@ void BM_feather_write_num_columns(nvbench::state& state,
   feather_write_common(view, sink_type, state);
 }
 
-// The cudftable type list without nested types, which Feather does not support yet, and
-// durations, whose day resolution has no Arrow equivalent
 using d_type_list_reduced = nvbench::enum_type_list<data_type::INTEGRAL,
                                                     data_type::FLOAT,
                                                     data_type::BOOL8,
                                                     data_type::DECIMAL,
                                                     data_type::TIMESTAMP,
-                                                    data_type::STRING>;
+                                                    data_type::DURATION,
+                                                    data_type::STRING,
+                                                    data_type::LIST,
+                                                    data_type::STRUCT>;
 NVBENCH_BENCH_TYPES(BM_feather_write_data_types, NVBENCH_TYPE_AXES(d_type_list_reduced))
   .set_name("feather_write_data_types")
   .set_type_axes_names({"data_type"})

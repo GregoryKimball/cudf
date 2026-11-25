@@ -16,11 +16,41 @@ def _make_table(num_rows):
     rng = np.random.default_rng(seed=0)
     valid = rng.random(num_rows) > 0.1
 
-    def masked(values):
-        return pa.array(values, mask=~valid)
+    def masked(values, type=None):
+        return pa.array(values, type=type, mask=~valid)
+
+    def lists(make_element):
+        return pa.array(
+            [
+                [make_element(i, j) for j in range(i % 4)]
+                if valid[i]
+                else None
+                for i in range(num_rows)
+            ]
+        )
+
+    # Struct children carry the struct's nulls, as cudf columns do
+    struct_valid = rng.random(num_rows) > 0.2
+    struct = pa.StructArray.from_arrays(
+        [
+            pa.array(
+                rng.integers(-1000, 1000, num_rows, dtype=np.int32),
+                mask=~(valid & struct_valid),
+            ),
+            pa.array([f"f{i}" for i in range(num_rows)], mask=~struct_valid),
+        ],
+        names=["a", "b"],
+        mask=pa.array(~struct_valid),
+    )
 
     return pa.table(
         {
+            "duration": masked(
+                rng.integers(0, 2**40, num_rows), type=pa.duration("ms")
+            ),
+            "list": lists(lambda i, j: i * j if j != 1 else None),
+            "list_of_lists": lists(lambda i, j: [f"{i}.{j}"] * j),
+            "struct": struct,
             "int8": masked(rng.integers(-100, 100, num_rows, dtype=np.int8)),
             "int64": masked(rng.integers(-(2**40), 2**40, num_rows)),
             "uint32": masked(
@@ -35,6 +65,23 @@ def _make_table(num_rows):
             "string": masked([f"s{i}" * int(i % 7) for i in range(num_rows)]),
         }
     )
+
+
+def _name_spec(field):
+    if pa.types.is_struct(field.type):
+        return (
+            field.name,
+            [
+                _name_spec(field.type.field(i))
+                for i in range(field.type.num_fields)
+            ],
+        )
+    if pa.types.is_list(field.type):
+        return (
+            field.name,
+            [("offsets", []), _name_spec(field.type.value_field)],
+        )
+    return (field.name, [])
 
 
 def _read(path, columns=None):
@@ -64,8 +111,33 @@ def test_read_feather_columns(tmp_path):
     path = tmp_path / "in.feather"
     pa_feather.write_feather(pa_table, path, compression="zstd")
 
-    columns = ["string", "int8"]
+    columns = ["string", "struct", "int8"]
     assert_table_and_meta_eq(pa_table.select(columns), _read(path, columns))
+
+
+def test_write_feather_column_names(tmp_path):
+    pa_table = _make_table(100).select(["int8", "list"])
+    path = tmp_path / "out.feather"
+    feather.write_feather(
+        feather.FeatherWriterOptions.builder(
+            plc.io.SinkInfo([str(path)]), plc.Table.from_arrow(pa_table)
+        )
+        .column_names(pa_table.column_names)
+        .build()
+    )
+    assert pa_feather.read_table(path).equals(pa_table)
+
+
+def test_read_feather_large_list_raises(tmp_path):
+    path = tmp_path / "in.feather"
+    pa_feather.write_feather(
+        pa.table(
+            {"a": pa.array([[1], [2, 3]], type=pa.large_list(pa.int64()))}
+        ),
+        path,
+    )
+    with pytest.raises(RuntimeError, match="large list"):
+        _read(path)
 
 
 def test_read_feather_lz4_linked_blocks_raises(tmp_path):
@@ -93,7 +165,7 @@ def test_write_feather_roundtrip(tmp_path, compression, max_rows_per_batch):
         feather.FeatherWriterOptions.builder(
             plc.io.SinkInfo([str(path)]), plc.Table.from_arrow(pa_table)
         )
-        .column_names(pa_table.column_names)
+        .column_metadata([_name_spec(field) for field in pa_table.schema])
         .compression(compression)
     )
     if max_rows_per_batch is not None:

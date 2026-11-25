@@ -48,7 +48,7 @@ data_type to_integer_type(flatbuf::Int const* type)
 }
 
 /**
- * @brief Maps a flat Arrow field to its cudf type and IPC layout.
+ * @brief Maps an Arrow field to its cudf type and IPC layout, ignoring its children.
  *
  * @throws cudf::logic_error if the field type is not supported
  */
@@ -57,8 +57,20 @@ std::pair<data_type, arrow_layout> to_cudf_type(flatbuf::Field const* field)
   auto const name = field->name() ? field->name()->str() : std::string{};
   CUDF_EXPECTS(field->dictionary() == nullptr,
                "Dictionary-encoded Feather column '" + name + "' is not supported");
-  CUDF_EXPECTS(field->children() == nullptr || field->children()->size() == 0,
-               "Nested Feather column '" + name + "' is not supported");
+  auto const num_children = field->children() ? field->children()->size() : 0;
+  switch (field->type_type()) {
+    case flatbuf::Type_List:
+      CUDF_EXPECTS(num_children == 1, "Feather list column '" + name + "' must have one child");
+      return {data_type{type_id::LIST}, arrow_layout::LIST};
+    case flatbuf::Type_Struct_: return {data_type{type_id::STRUCT}, arrow_layout::STRUCT};
+    case flatbuf::Type_LargeList:
+      CUDF_FAIL("Feather column '" + name +
+                "' is a large list, which cudf lists with 32-bit offsets cannot hold");
+    default:
+      CUDF_EXPECTS(num_children == 0,
+                   "Feather column '" + name + "' has unsupported nested Arrow type " +
+                     flatbuf::EnumNameType(field->type_type()));
+  }
 
   switch (field->type_type()) {
     case flatbuf::Type_Bool: return {data_type{type_id::BOOL8}, arrow_layout::BOOLEAN};
@@ -139,6 +151,25 @@ void count_nodes_and_buffers(flatbuf::Field const* field, int32_t& nodes, int32_
   }
 }
 
+/**
+ * @brief Builds the spec of a field and its children, whose nodes and buffers start at the given
+ * positions; advances the positions past them.
+ */
+column_spec make_spec(flatbuf::Field const* field, int32_t& nodes, int32_t& buffers)
+{
+  auto const [type, layout] = to_cudf_type(field);
+  column_spec spec{
+    field->name() ? field->name()->str() : std::string{}, type, layout, nodes, buffers, {}};
+  ++nodes;
+  buffers += num_buffers(layout);
+  if (layout == arrow_layout::LIST || layout == arrow_layout::STRUCT) {
+    for (auto const child : *field->children()) {
+      spec.children.push_back(make_spec(child, nodes, buffers));
+    }
+  }
+  return spec;
+}
+
 }  // namespace
 
 std::vector<column_spec> select_columns(flatbuf::Schema const* schema,
@@ -161,15 +192,15 @@ std::vector<column_spec> select_columns(flatbuf::Schema const* schema,
     count_nodes_and_buffers(field, nodes, buffers);
   }
 
-  auto const make_spec = [](field_position const& pos) {
-    auto const [type, layout] = to_cudf_type(pos.field);
-    auto name                 = pos.field->name() ? pos.field->name()->str() : std::string{};
-    return column_spec{std::move(name), type, layout, pos.node_index, pos.buffer_index};
+  auto const spec_at = [](field_position const& pos) {
+    auto node   = pos.node_index;
+    auto buffer = pos.buffer_index;
+    return make_spec(pos.field, node, buffer);
   };
 
   std::vector<column_spec> specs;
   if (not columns.has_value()) {
-    std::transform(positions.begin(), positions.end(), std::back_inserter(specs), make_spec);
+    std::transform(positions.begin(), positions.end(), std::back_inserter(specs), spec_at);
     return specs;
   }
   for (auto const& name : *columns) {
@@ -177,7 +208,7 @@ std::vector<column_spec> select_columns(flatbuf::Schema const* schema,
       return pos.field->name() != nullptr && pos.field->name()->str() == name;
     });
     CUDF_EXPECTS(it != positions.end(), "Column '" + name + "' not found in Feather file");
-    specs.push_back(make_spec(*it));
+    specs.push_back(spec_at(*it));
   }
   return specs;
 }
@@ -409,10 +440,22 @@ flatbuffers::Offset<flatbuf::Field> make_field(FlatBufferBuilder& fbb, field_inf
         type      = flatbuf::CreateUtf8(fbb).Union();
       }
       break;
+    case type_id::LIST:
+      type_type = flatbuf::Type_List;
+      type      = flatbuf::CreateList(fbb).Union();
+      break;
+    case type_id::STRUCT:
+      type_type = flatbuf::Type_Struct_;
+      type      = flatbuf::CreateStruct_(fbb).Union();
+      break;
     default: CUDF_FAIL("Feather writer does not support the type of column '" + field.name + "'");
   }
   // Arrow readers require a children vector even for flat fields
-  auto const children = fbb.CreateVector(std::vector<flatbuffers::Offset<flatbuf::Field>>{});
+  std::vector<flatbuffers::Offset<flatbuf::Field>> child_offsets;
+  for (auto const& child : field.children) {
+    child_offsets.push_back(make_field(fbb, child));
+  }
+  auto const children = fbb.CreateVector(child_offsets);
   return flatbuf::CreateField(
     fbb, fbb.CreateString(field.name), true, type_type, type, 0, children);
 }

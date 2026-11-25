@@ -179,3 +179,50 @@ def test_feather_cudf_writer_cudf_reader(tmp_path, compression):
         got = cudf.read_feather(fname)
 
     assert_eq(gdf, got)
+
+
+def _nested_gdf(nrows):
+    rng = np.random.default_rng(seed=0)
+    valid = rng.random(nrows) > 0.1
+    return cudf.DataFrame(
+        {
+            "duration": cudf.Series(
+                rng.integers(0, 2**40, nrows).astype("timedelta64[ms]")
+            ),
+            "list": [
+                [i * j for j in range(i % 4)] if valid[i] else None
+                for i in range(nrows)
+            ],
+            "struct": [
+                {"a": i, "b": f"s{i}"} if valid[i] else None
+                for i in range(nrows)
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("compression", [None, "zstd", "uncompressed"])
+def test_feather_cudf_writer_pyarrow_reader_nested(tmp_path, compression):
+    gdf = _nested_gdf(10_000)
+    fname = tmp_path / "cudf.feather"
+
+    with _no_cpu_fallback():
+        gdf.to_feather(fname, compression=compression)
+
+    got = pa.ipc.open_file(fname).read_all()
+    assert got.equals(gdf.to_arrow(preserve_index=False))
+
+
+@pytest.mark.parametrize("compression", ["zstd", None])
+def test_feather_pyarrow_writer_cudf_reader_nested(tmp_path, compression):
+    expected = _nested_gdf(10_000)
+    table = expected.to_arrow(preserve_index=False)
+    fname = tmp_path / "pyarrow.feather"
+    options = pa.ipc.IpcWriteOptions(compression=compression)
+    with pa.ipc.new_file(str(fname), table.schema, options=options) as writer:
+        writer.write_table(table)
+
+    with _no_cpu_fallback():
+        got = cudf.read_feather(fname)
+
+    assert_eq(expected, got)

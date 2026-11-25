@@ -1312,7 +1312,7 @@ chunked_parquet_writer_options_builder::chunked_parquet_writer_options_builder(
 namespace feather::detail {
 void write_feather(data_sink* sink,
                    table_view const& table,
-                   std::vector<std::string> const& column_names,
+                   std::vector<column_name_info> const& column_names,
                    compression_type compression,
                    size_type max_rows_per_batch,
                    cuda::stream_ref stream);
@@ -1393,9 +1393,16 @@ void write_feather(feather_writer_options const& options, cuda::stream_ref strea
   auto sinks = make_datasinks(options.get_sink());
   CUDF_EXPECTS(sinks.size() == 1, "Feather format only supports single sink");
 
+  auto column_names = options.get_column_metadata();
+  if (column_names.empty()) {
+    std::transform(options.get_column_names().begin(),
+                   options.get_column_names().end(),
+                   std::back_inserter(column_names),
+                   [](auto const& name) { return column_name_info{name}; });
+  }
   feather::detail::write_feather(sinks[0].get(),
                                  options.get_table(),
-                                 options.get_column_names(),
+                                 column_names,
                                  options.get_compression(),
                                  options.get_max_rows_per_batch(),
                                  stream);

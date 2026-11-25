@@ -4,6 +4,7 @@
 from rmm.pylibrmm.memory_resource import DeviceMemoryResource
 
 from pylibcudf.io.types import (
+    ColumnNameSpec,
     CompressionType,
     SinkInfo,
     SourceInfo,
@@ -23,6 +24,9 @@ __all__ = [
 
 class FeatherWriterOptions:
     def set_column_names(self, names: list[str]) -> None: ...
+    def set_column_metadata(
+        self, column_names: list[ColumnNameSpec]
+    ) -> None: ...
     def set_compression(self, compression: CompressionType) -> None: ...
     def set_max_rows_per_batch(self, rows: int) -> None: ...
     @staticmethod
@@ -33,6 +37,9 @@ class FeatherWriterOptions:
 class FeatherWriterOptionsBuilder:
     def column_names(
         self, names: list[str]
+    ) -> FeatherWriterOptionsBuilder: ...
+    def column_metadata(
+        self, column_names: list[ColumnNameSpec]
     ) -> FeatherWriterOptionsBuilder: ...
     def compression(
         self, compression: CompressionType

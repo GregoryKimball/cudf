@@ -16,7 +16,7 @@ from pylibcudf.libcudf.io.feather cimport (
     read_feather as cpp_read_feather,
     write_feather as cpp_write_feather,
 )
-from pylibcudf.libcudf.io.types cimport compression_type
+from pylibcudf.libcudf.io.types cimport column_name_info, compression_type
 from pylibcudf.libcudf.types cimport size_type
 from pylibcudf.table cimport Table
 
@@ -43,6 +43,17 @@ cdef vector[string] _encode_names(list names):
     for name in names:
         vec.push_back(str(name).encode())
     return vec
+
+
+cdef vector[column_name_info] _make_column_info(list column_names):
+    cdef vector[column_name_info] infos
+    cdef column_name_info info
+    infos.reserve(len(column_names))
+    for name, child_names in column_names:
+        info.name = str(name).encode()
+        info.children = _make_column_info(list(child_names))
+        infos.push_back(info)
+    return infos
 
 
 cdef class FeatherWriterOptions:
@@ -93,6 +104,25 @@ cdef class FeatherWriterOptions:
         """
         self.c_obj.set_column_names(_encode_names(names))
 
+    cpdef void set_column_metadata(self, list column_names):
+        """
+        Sets the names of the columns and their children, taking precedence
+        over the column names.
+
+        Parameters
+        ----------
+        column_names : list[tuple[str, list]]
+            One ``(name, children)`` entry per column, where ``children`` has
+            the same form. A list's children are the offsets name followed by
+            the element, as in ``TableWithMetadata``; for example
+            ``[("id", []), ("point", [("x", []), ("y", [])])]``.
+
+        Returns
+        -------
+        None
+        """
+        self.c_obj.set_column_metadata(_make_column_info(column_names))
+
     cpdef void set_compression(self, compression_type compression):
         """
         Sets the buffer compression codec: NONE, LZ4 (LZ4 frame) or ZSTD.
@@ -141,6 +171,24 @@ cdef class FeatherWriterOptionsBuilder:
         FeatherWriterOptionsBuilder
         """
         self.c_obj.column_names(_encode_names(names))
+        return self
+
+    cpdef FeatherWriterOptionsBuilder column_metadata(self, list column_names):
+        """
+        Sets the names of the columns and their children, taking precedence
+        over the column names.
+
+        Parameters
+        ----------
+        column_names : list[tuple[str, list]]
+            One ``(name, children)`` entry per column; see
+            ``FeatherWriterOptions.set_column_metadata``
+
+        Returns
+        -------
+        FeatherWriterOptionsBuilder
+        """
+        self.c_obj.column_metadata(_make_column_info(column_names))
         return self
 
     cpdef FeatherWriterOptionsBuilder compression(self, compression_type compression):

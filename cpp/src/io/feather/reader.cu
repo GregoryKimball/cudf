@@ -9,6 +9,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/concatenate.hpp>
+#include <cudf/detail/copy.hpp>
 #include <cudf/detail/transform.hpp>
 #include <cudf/detail/utilities/batched_memcpy.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
@@ -218,8 +219,9 @@ struct batch_column {
   size_type null_count;
   std::optional<cuda::device_buffer<bitmask_type>> null_mask;
   std::optional<cuda::device_buffer<bitmask_type>> bits;  ///< BOOLEAN values
-  std::optional<rmm::device_buffer> values;               ///< values, or string offsets
+  std::optional<rmm::device_buffer> values;               ///< values, or string or list offsets
   std::optional<rmm::device_buffer> chars;
+  std::vector<batch_column> children;
 };
 
 cuda::device_buffer<bitmask_type> make_mask_buffer(size_type num_rows,
@@ -236,18 +238,158 @@ cuda::device_buffer<bitmask_type> make_mask_buffer(size_type num_rows,
   return cuda::device_buffer<bitmask_type>(stream, mr, words, cuda::no_init);
 }
 
+/**
+ * @brief Plans the decoding of a column and its children in one record batch.
+ *
+ * @param expected_rows Required node length: the batch length for top-level columns and the
+ * parent length for struct children; unset for list children
+ */
+template <typename BodyRef>
+void plan_column(column_spec const& spec,
+                 flatbuf::RecordBatch const* batch,
+                 BodyRef const& body_ref,
+                 std::optional<flatbuf::CompressionType> codec,
+                 std::optional<int64_t> expected_rows,
+                 batch_column& col,
+                 decode_plan& plan,
+                 cuda::stream_ref stream,
+                 rmm::device_async_resource_ref mr)
+{
+  CUDF_EXPECTS(spec.node_index < static_cast<int32_t>(batch->nodes()->size()),
+               "Feather record batch has too few field nodes");
+  auto const node     = batch->nodes()->Get(spec.node_index);
+  auto const num_rows = node->length();
+  CUDF_EXPECTS(not expected_rows.has_value() || num_rows == *expected_rows,
+               "Feather field length does not match its parent");
+  CUDF_EXPECTS(num_rows >= 0 && num_rows <= std::numeric_limits<size_type>::max(),
+               "Feather field has more rows than cudf supports",
+               std::overflow_error);
+  CUDF_EXPECTS(node->null_count() >= 0 && node->null_count() <= num_rows,
+               "Invalid Feather field null count");
+  col.num_rows   = static_cast<size_type>(num_rows);
+  col.null_count = static_cast<size_type>(node->null_count());
+  if (num_rows == 0) { return; }
+
+  auto const validity = body_ref(spec.buffer_index);
+  if (col.null_count > 0) {
+    CUDF_EXPECTS(validity.size > 0, "Feather column with nulls has no validity buffer");
+    auto const size = decoded_size(validity, codec);
+    col.null_mask   = make_mask_buffer(col.num_rows, size, stream, mr);
+    plan_buffer(validity, codec, reinterpret_cast<uint8_t*>(col.null_mask->data()), size, plan);
+  }
+  if (spec.layout == arrow_layout::STRUCT) {
+    col.children.resize(spec.children.size());
+    for (std::size_t i = 0; i < spec.children.size(); ++i) {
+      plan_column(
+        spec.children[i], batch, body_ref, codec, num_rows, col.children[i], plan, stream, mr);
+    }
+    return;
+  }
+
+  auto const values      = body_ref(spec.buffer_index + 1);
+  auto const values_size = decoded_size(values, codec);
+  switch (spec.layout) {
+    case arrow_layout::BOOLEAN: {
+      col.bits = make_mask_buffer(col.num_rows, values_size, stream, mr);
+      plan_buffer(values, codec, reinterpret_cast<uint8_t*>(col.bits->data()), values_size, plan);
+      break;
+    }
+    case arrow_layout::FIXED_WIDTH: {
+      CUDF_EXPECTS(values_size >= static_cast<std::size_t>(num_rows) * size_of(spec.type),
+                   "Feather values buffer is too small");
+      col.values.emplace(values_size, stream, mr);
+      plan_buffer(values, codec, static_cast<uint8_t*>(col.values->data()), values_size, plan);
+      break;
+    }
+    case arrow_layout::LIST: {
+      CUDF_EXPECTS(values_size >= static_cast<std::size_t>(num_rows + 1) * sizeof(int32_t),
+                   "Feather list offsets buffer is too small");
+      col.values.emplace(values_size, stream, mr);
+      plan_buffer(values, codec, static_cast<uint8_t*>(col.values->data()), values_size, plan);
+      col.children.resize(1);
+      plan_column(
+        spec.children[0], batch, body_ref, codec, std::nullopt, col.children[0], plan, stream, mr);
+      break;
+    }
+    default: {
+      auto const offset_width = spec.layout == arrow_layout::UTF8 ? 4 : 8;
+      CUDF_EXPECTS(values_size >= static_cast<std::size_t>(num_rows + 1) * offset_width,
+                   "Feather offsets buffer is too small");
+      col.values.emplace(values_size, stream, mr);
+      plan_buffer(values, codec, static_cast<uint8_t*>(col.values->data()), values_size, plan);
+
+      auto const chars      = body_ref(spec.buffer_index + 2);
+      auto const chars_size = decoded_size(chars, codec);
+      col.chars.emplace(chars_size, stream, mr);
+      plan_buffer(chars, codec, static_cast<uint8_t*>(col.chars->data()), chars_size, plan);
+      break;
+    }
+  }
+}
+
+std::unique_ptr<column> make_empty(column_spec const& spec,
+                                   cuda::stream_ref stream,
+                                   cudf::memory_resources mr)
+{
+  auto empty_mask = [&] {
+    return cuda::device_buffer<bitmask_type>(stream, mr.get_output_mr(), 0, cuda::no_init);
+  };
+  switch (spec.layout) {
+    case arrow_layout::LIST:
+      return make_lists_column(0,
+                               make_empty_column(type_id::INT32),
+                               make_empty(spec.children[0], stream, mr),
+                               0,
+                               empty_mask());
+    case arrow_layout::STRUCT: {
+      std::vector<std::unique_ptr<column>> children;
+      for (auto const& child : spec.children) {
+        children.push_back(make_empty(child, stream, mr));
+      }
+      return make_structs_column(0, std::move(children), 0, empty_mask(), stream, mr);
+    }
+    default: return make_empty_column(spec.type);
+  }
+}
+
 std::unique_ptr<column> make_column(column_spec const& spec,
                                     batch_column&& buffers,
                                     cuda::stream_ref stream,
                                     cudf::memory_resources mr)
 {
   auto const num_rows = buffers.num_rows;
-  if (num_rows == 0) { return make_empty_column(spec.type); }
+  if (num_rows == 0) { return make_empty(spec, stream, mr); }
   auto null_mask = buffers.null_mask.has_value() ? std::move(*buffers.null_mask)
                                                  : cuda::device_buffer<bitmask_type>(
                                                      stream, mr.get_output_mr(), 0, cuda::no_init);
 
   switch (spec.layout) {
+    case arrow_layout::LIST: {
+      auto offsets = std::make_unique<column>(
+        data_type{type_id::INT32},
+        num_rows + 1,
+        std::move(*buffers.values),
+        cuda::device_buffer<bitmask_type>(stream, mr.get_output_mr(), 0, cuda::no_init),
+        0);
+      auto child = make_column(spec.children[0], std::move(buffers.children[0]), stream, mr);
+      auto col   = make_lists_column(
+        num_rows, std::move(offsets), std::move(child), buffers.null_count, std::move(null_mask));
+      // Arrow allows null lists to cover child elements, which cudf does not
+      if (buffers.null_count > 0 && cudf::detail::has_nonempty_nulls(col->view(), stream, mr)) {
+        return cudf::detail::purge_nonempty_nulls(col->view(), stream, mr);
+      }
+      return col;
+    }
+    case arrow_layout::STRUCT: {
+      std::vector<std::unique_ptr<column>> children;
+      for (std::size_t i = 0; i < spec.children.size(); ++i) {
+        children.push_back(
+          make_column(spec.children[i], std::move(buffers.children[i]), stream, mr));
+      }
+      // Superimposes the struct's nulls onto its children
+      return make_structs_column(
+        num_rows, std::move(children), buffers.null_count, std::move(null_mask), stream, mr);
+    }
     case arrow_layout::FIXED_WIDTH:
       return std::make_unique<column>(
         spec.type, num_rows, std::move(*buffers.values), std::move(null_mask), buffers.null_count);
@@ -272,6 +414,16 @@ std::unique_ptr<column> make_column(column_spec const& spec,
                                  std::move(null_mask));
     }
   }
+}
+
+column_name_info make_name_info(column_spec const& spec)
+{
+  column_name_info info{spec.name};
+  if (spec.layout == arrow_layout::LIST) { info.children.emplace_back("offsets"); }
+  for (auto const& child : spec.children) {
+    info.children.push_back(make_name_info(child));
+  }
+  return info;
 }
 
 }  // namespace
@@ -386,57 +538,17 @@ table_with_metadata read_feather(datasource* source,
                          static_cast<std::size_t>(buf->length())};
     };
 
-    auto& batch_columns = batches.emplace_back();
-    for (auto const& spec : specs) {
-      CUDF_EXPECTS(spec.node_index < static_cast<int32_t>(batch->nodes()->size()),
-                   "Feather record batch has too few field nodes");
-      auto const node = batch->nodes()->Get(spec.node_index);
-      CUDF_EXPECTS(node->length() == num_rows, "Feather field length does not match its batch");
-      CUDF_EXPECTS(node->null_count() >= 0 && node->null_count() <= num_rows,
-                   "Invalid Feather field null count");
-      auto& col      = batch_columns.emplace_back();
-      col.num_rows   = static_cast<size_type>(num_rows);
-      col.null_count = static_cast<size_type>(node->null_count());
-      if (num_rows == 0) { continue; }
-
-      auto const validity = body_ref(spec.buffer_index);
-      if (col.null_count > 0) {
-        CUDF_EXPECTS(validity.size > 0, "Feather column with nulls has no validity buffer");
-        auto const size = decoded_size(validity, codec);
-        col.null_mask   = make_mask_buffer(col.num_rows, size, stream, batch_mr.get_output_mr());
-        plan_buffer(validity, codec, reinterpret_cast<uint8_t*>(col.null_mask->data()), size, plan);
-      }
-
-      auto const values      = body_ref(spec.buffer_index + 1);
-      auto const values_size = decoded_size(values, codec);
-      switch (spec.layout) {
-        case arrow_layout::BOOLEAN: {
-          col.bits = make_mask_buffer(col.num_rows, values_size, stream, batch_mr.get_output_mr());
-          plan_buffer(
-            values, codec, reinterpret_cast<uint8_t*>(col.bits->data()), values_size, plan);
-          break;
-        }
-        case arrow_layout::FIXED_WIDTH: {
-          CUDF_EXPECTS(values_size >= static_cast<std::size_t>(num_rows) * size_of(spec.type),
-                       "Feather values buffer is too small");
-          col.values.emplace(values_size, stream, batch_mr.get_output_mr());
-          plan_buffer(values, codec, static_cast<uint8_t*>(col.values->data()), values_size, plan);
-          break;
-        }
-        default: {
-          auto const offset_width = spec.layout == arrow_layout::UTF8 ? 4 : 8;
-          CUDF_EXPECTS(values_size >= static_cast<std::size_t>(num_rows + 1) * offset_width,
-                       "Feather offsets buffer is too small");
-          col.values.emplace(values_size, stream, batch_mr.get_output_mr());
-          plan_buffer(values, codec, static_cast<uint8_t*>(col.values->data()), values_size, plan);
-
-          auto const chars      = body_ref(spec.buffer_index + 2);
-          auto const chars_size = decoded_size(chars, codec);
-          col.chars.emplace(chars_size, stream, batch_mr.get_output_mr());
-          plan_buffer(chars, codec, static_cast<uint8_t*>(col.chars->data()), chars_size, plan);
-          break;
-        }
-      }
+    auto& batch_columns = batches.emplace_back(specs.size());
+    for (std::size_t c = 0; c < specs.size(); ++c) {
+      plan_column(specs[c],
+                  batch,
+                  body_ref,
+                  codec,
+                  num_rows,
+                  batch_columns[c],
+                  plan,
+                  stream,
+                  batch_mr.get_output_mr());
     }
   }
 
@@ -447,9 +559,9 @@ table_with_metadata read_feather(datasource* source,
   std::vector<std::unique_ptr<column>> output;
   table_metadata metadata;
   for (std::size_t c = 0; c < specs.size(); ++c) {
-    metadata.schema_info.emplace_back(specs[c].name);
+    metadata.schema_info.push_back(make_name_info(specs[c]));
     if (num_batches == 0) {
-      output.push_back(make_empty_column(specs[c].type));
+      output.push_back(make_empty(specs[c], stream, mr));
       continue;
     }
     std::vector<std::unique_ptr<column>> pieces;

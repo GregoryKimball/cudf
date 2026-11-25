@@ -14,7 +14,9 @@
 #include <cudf/io/data_sink.hpp>
 #include <cudf/io/detail/codec.hpp>
 #include <cudf/io/experimental/feather.hpp>
+#include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/strings_column_view.hpp>
+#include <cudf/structs/structs_column_view.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/error.hpp>
 
@@ -46,6 +48,8 @@ arrow_layout layout_of(column_view const& col)
                  strings_column_view(col).offsets().type().id() == type_id::INT64
                ? arrow_layout::LARGE_UTF8
                : arrow_layout::UTF8;
+    case type_id::LIST: return arrow_layout::LIST;
+    case type_id::STRUCT: return arrow_layout::STRUCT;
     default: return arrow_layout::FIXED_WIDTH;
   }
 }
@@ -65,31 +69,50 @@ struct batch_buffers {
   std::vector<cuda::device_buffer<bitmask_type>> owned_masks;
 };
 
-batch_buffers collect_buffers(table_view const& batch,
-                              cuda::stream_ref stream,
-                              cudf::memory_resources mr)
+/**
+ * @brief Returns the children written for a nested column, in Arrow field order.
+ */
+std::vector<column_view> arrow_children(column_view const& col, cuda::stream_ref stream)
 {
-  batch_buffers out;
-  for (auto const& input : batch) {
-    // Sliced columns are copied so that buffers start at row 0 and offsets start at 0
-    auto col = input;
-    if (col.offset() != 0) {
-      col = out.owned_columns.emplace_back(std::make_unique<column>(input, stream, mr))->view();
-    }
-    auto const num_rows   = static_cast<std::size_t>(col.size());
-    auto const null_count = col.null_count();
-    out.nodes.emplace_back(col.size(), null_count);
-
-    auto const bitmap_size = (num_rows + 7) / 8;
-    out.buffers.push_back(
-      {reinterpret_cast<uint8_t const*>(col.null_mask()), null_count > 0 ? bitmap_size : 0});
-    if (num_rows == 0) {
-      for (int32_t i = 1; i < num_buffers(layout_of(col)); ++i) {
-        out.buffers.push_back({nullptr, 0});
+  switch (layout_of(col)) {
+    case arrow_layout::LIST: return {lists_column_view(col).get_sliced_child(stream)};
+    case arrow_layout::STRUCT: {
+      structs_column_view const structs(col);
+      std::vector<column_view> children;
+      for (size_type i = 0; i < structs.num_children(); ++i) {
+        children.push_back(structs.get_sliced_child(i, stream));
       }
-      continue;
+      return children;
     }
+    default: return {};
+  }
+}
 
+/**
+ * @brief Appends the IPC field nodes and buffers of a column and its children, in pre-order.
+ */
+void collect_column(column_view const& input,
+                    batch_buffers& out,
+                    cuda::stream_ref stream,
+                    cudf::memory_resources mr)
+{
+  // Sliced columns are copied so that buffers start at row 0 and offsets start at 0
+  auto col = input;
+  if (col.offset() != 0) {
+    col = out.owned_columns.emplace_back(std::make_unique<column>(input, stream, mr))->view();
+  }
+  auto const num_rows   = static_cast<std::size_t>(col.size());
+  auto const null_count = col.null_count();
+  out.nodes.emplace_back(col.size(), null_count);
+
+  auto const bitmap_size = (num_rows + 7) / 8;
+  out.buffers.push_back(
+    {reinterpret_cast<uint8_t const*>(col.null_mask()), null_count > 0 ? bitmap_size : 0});
+  if (num_rows == 0) {
+    for (int32_t i = 1; i < num_buffers(layout_of(col)); ++i) {
+      out.buffers.push_back({nullptr, 0});
+    }
+  } else {
     switch (layout_of(col)) {
       case arrow_layout::BOOLEAN: {
         auto mask = cudf::detail::bools_to_mask(col, stream, mr).first;
@@ -100,6 +123,12 @@ batch_buffers collect_buffers(table_view const& batch,
       case arrow_layout::FIXED_WIDTH:
         out.buffers.push_back({col.head<uint8_t>(), num_rows * size_of(col.type())});
         break;
+      case arrow_layout::LIST: {
+        auto const offsets = lists_column_view(col).offsets();
+        out.buffers.push_back({offsets.head<uint8_t>(), (num_rows + 1) * size_of(offsets.type())});
+        break;
+      }
+      case arrow_layout::STRUCT: break;
       default: {
         auto const strings = strings_column_view(col);
         auto const offsets = strings.offsets();
@@ -110,7 +139,44 @@ batch_buffers collect_buffers(table_view const& batch,
       }
     }
   }
+  for (auto const& child : arrow_children(col, stream)) {
+    collect_column(child, out, stream, mr);
+  }
+}
+
+batch_buffers collect_buffers(table_view const& batch,
+                              cuda::stream_ref stream,
+                              cudf::memory_resources mr)
+{
+  batch_buffers out;
+  for (auto const& col : batch) {
+    collect_column(col, out, stream, mr);
+  }
   return out;
+}
+
+/**
+ * @brief Describes a column and its children for the schema.
+ *
+ * @param names Names of the column and its children; struct fields without names are numbered
+ */
+field_info make_field_info(column_view const& col,
+                           column_name_info const& names,
+                           cuda::stream_ref stream)
+{
+  field_info field{names.name, col.type(), layout_of(col), {}};
+  auto const children = arrow_children(col, stream);
+  // List name info carries an "offsets" entry ahead of the child, as in the readers' metadata
+  auto const first_name = layout_of(col) == arrow_layout::LIST ? 1 : 0;
+  for (std::size_t i = 0; i < children.size(); ++i) {
+    auto const name_index = first_name + i;
+    auto const child_names =
+      name_index < names.children.size()
+        ? names.children[name_index]
+        : column_name_info{layout_of(col) == arrow_layout::LIST ? "item" : std::to_string(i)};
+    field.children.push_back(make_field_info(children[i], child_names, stream));
+  }
+  return field;
 }
 
 /**
@@ -275,7 +341,7 @@ void write_body(data_sink* sink, encoded_body const& body, cuda::stream_ref stre
 
 void write_feather(data_sink* sink,
                    table_view const& table,
-                   std::vector<std::string> const& column_names,
+                   std::vector<column_name_info> const& column_names,
                    compression_type compression,
                    size_type max_rows_per_batch,
                    cuda::stream_ref stream)
@@ -285,9 +351,10 @@ void write_feather(data_sink* sink,
     "Number of Feather column names must match the number of columns");
   std::vector<field_info> fields;
   for (size_type c = 0; c < table.num_columns(); ++c) {
-    auto const& col = table.column(c);
     fields.push_back(
-      {column_names.empty() ? std::to_string(c) : column_names[c], col.type(), layout_of(col)});
+      make_field_info(table.column(c),
+                      column_names.empty() ? column_name_info{std::to_string(c)} : column_names[c],
+                      stream));
   }
   auto const codec = compression == compression_type::NONE
                        ? std::optional<flatbuf::CompressionType>{}

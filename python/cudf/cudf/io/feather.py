@@ -68,8 +68,8 @@ def read_feather(
     try:
         result = plc.io.experimental.feather.read_feather(options)
     except (RuntimeError, TypeError, ValueError, NotImplementedError) as err:
-        # The GPU reader rejects dictionary-encoded and nested columns, and
-        # the multi-block LZ4 frames PyArrow writes for buffers over 64 KiB.
+        # The GPU reader rejects dictionary-encoded columns, large lists, and
+        # the linked-block LZ4 frames PyArrow writes for buffers over 64 KiB.
         return _cpu_read_feather(path, columns, str(err))
     return DataFrame.from_pylibcudf(result)
 
@@ -99,11 +99,23 @@ def _gpu_unsupported_reason(df, compression, compression_level, version):
     if compression not in _COMPRESSION:
         return f"compression {compression!r}"
     for name, dtype in df._dtypes:
-        if isinstance(
-            dtype, (CategoricalDtype, IntervalDtype, ListDtype, StructDtype)
-        ):
+        if isinstance(dtype, (CategoricalDtype, IntervalDtype)):
             return f"column {name!r} of type {dtype}"
     return None
+
+
+def _column_name_spec(name, dtype):
+    if isinstance(dtype, StructDtype):
+        return (
+            str(name),
+            [_column_name_spec(k, v) for k, v in dtype.fields.items()],
+        )
+    if isinstance(dtype, ListDtype):
+        return (
+            str(name),
+            [("offsets", []), _column_name_spec("item", dtype.element_type)],
+        )
+    return (str(name), [])
 
 
 @ioutils.doc_to_feather()
@@ -159,7 +171,9 @@ def _plc_write_feather(df, path_or_buf, compression, chunksize):
             plc.io.SinkInfo([path_or_buf]),
             plc.Table([col.plc_column for col in df._columns]),
         )
-        builder.column_names([str(name) for name in df._column_names])
+        builder.column_metadata(
+            [_column_name_spec(name, dtype) for name, dtype in df._dtypes]
+        )
         builder.compression(_COMPRESSION[compression])
         if chunksize is not None:
             builder.max_rows_per_batch(chunksize)

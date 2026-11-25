@@ -148,14 +148,21 @@ enum class arrow_layout : uint8_t {
   BOOLEAN,      ///< validity + bit-packed values
   UTF8,         ///< validity + int32 offsets + chars
   LARGE_UTF8,   ///< validity + int64 offsets + chars
+  LIST,         ///< validity + int32 offsets; one child
+  STRUCT,       ///< validity; any number of children
 };
 
 /**
- * @brief Returns the number of IPC buffers for a supported Arrow layout.
+ * @brief Returns the number of IPC buffers for a supported Arrow layout, excluding children.
  */
 constexpr int32_t num_buffers(arrow_layout layout)
 {
-  return (layout == arrow_layout::UTF8 || layout == arrow_layout::LARGE_UTF8) ? 3 : 2;
+  switch (layout) {
+    case arrow_layout::UTF8:
+    case arrow_layout::LARGE_UTF8: return 3;
+    case arrow_layout::STRUCT: return 1;
+    default: return 2;
+  }
 }
 
 /**
@@ -167,6 +174,7 @@ struct column_spec {
   arrow_layout layout;
   int32_t node_index;    ///< Index of the column's node in each record batch
   int32_t buffer_index;  ///< Index of the column's first buffer in each record batch
+  std::vector<column_spec> children;
 };
 
 /**
@@ -227,6 +235,7 @@ struct field_info {
   std::string name;
   data_type type;
   arrow_layout layout;
+  std::vector<field_info> children;
 };
 
 /**
