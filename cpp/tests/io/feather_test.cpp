@@ -106,8 +106,10 @@ TEST_F(FeatherTest, FixedWidth)
   cudf::test::fixed_width_column_wrapper<int8_t> int8_col({-128, -1, 0, 1, 127},
                                                           {true, false, true, true, true});
   cudf::test::fixed_width_column_wrapper<int64_t> int64_col({1, 2, 3, 4, 5});
-  cudf::test::fixed_width_column_wrapper<uint32_t> uint32_col({0, 1, 2, 3, 4294967295U},
-                                                              {true, true, false, true, true});
+  std::vector<uint32_t> const uint32_data{0, 1, 2, 3, 4294967295U};
+  std::vector<bool> const uint32_valid{true, true, false, true, true};
+  cudf::test::fixed_width_column_wrapper<uint32_t> uint32_col(
+    uint32_data.begin(), uint32_data.end(), uint32_valid.begin());
   cudf::test::fixed_width_column_wrapper<float> float_col({1.5f, 2.5f, 3.5f, 4.5f, 5.5f},
                                                           {false, true, true, true, true});
   cudf::test::fixed_width_column_wrapper<double> double_col({1.0, 2.0, 3.0, 4.0, 5.0});
