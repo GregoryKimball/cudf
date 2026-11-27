@@ -39,22 +39,22 @@ enum CompressionType : int8_t {
   CompressionType_MAX       = CompressionType_ZSTD
 };
 
-inline const CompressionType (&EnumValuesCompressionType())[2]
+inline CompressionType const (&EnumValuesCompressionType())[2]
 {
-  static const CompressionType values[] = {CompressionType_LZ4_FRAME, CompressionType_ZSTD};
+  static CompressionType const values[] = {CompressionType_LZ4_FRAME, CompressionType_ZSTD};
   return values;
 }
 
-inline const char* const* EnumNamesCompressionType()
+inline char const* const* EnumNamesCompressionType()
 {
-  static const char* const names[3] = {"LZ4_FRAME", "ZSTD", nullptr};
+  static char const* const names[3] = {"LZ4_FRAME", "ZSTD", nullptr};
   return names;
 }
 
-inline const char* EnumNameCompressionType(CompressionType e)
+inline char const* EnumNameCompressionType(CompressionType e)
 {
   if (::flatbuffers::IsOutRange(e, CompressionType_LZ4_FRAME, CompressionType_ZSTD)) return "";
-  const size_t index = static_cast<size_t>(e);
+  size_t const index = static_cast<size_t>(e);
   return EnumNamesCompressionType()[index];
 }
 
@@ -74,23 +74,23 @@ enum BodyCompressionMethod : int8_t {
   BodyCompressionMethod_MAX    = BodyCompressionMethod_BUFFER
 };
 
-inline const BodyCompressionMethod (&EnumValuesBodyCompressionMethod())[1]
+inline BodyCompressionMethod const (&EnumValuesBodyCompressionMethod())[1]
 {
-  static const BodyCompressionMethod values[] = {BodyCompressionMethod_BUFFER};
+  static BodyCompressionMethod const values[] = {BodyCompressionMethod_BUFFER};
   return values;
 }
 
-inline const char* const* EnumNamesBodyCompressionMethod()
+inline char const* const* EnumNamesBodyCompressionMethod()
 {
-  static const char* const names[2] = {"BUFFER", nullptr};
+  static char const* const names[2] = {"BUFFER", nullptr};
   return names;
 }
 
-inline const char* EnumNameBodyCompressionMethod(BodyCompressionMethod e)
+inline char const* EnumNameBodyCompressionMethod(BodyCompressionMethod e)
 {
   if (::flatbuffers::IsOutRange(e, BodyCompressionMethod_BUFFER, BodyCompressionMethod_BUFFER))
     return "";
-  const size_t index = static_cast<size_t>(e);
+  size_t const index = static_cast<size_t>(e);
   return EnumNamesBodyCompressionMethod()[index];
 }
 
@@ -103,45 +103,60 @@ inline const char* EnumNameBodyCompressionMethod(BodyCompressionMethod e)
 /// which may include experimental metadata types. For maximum compatibility,
 /// it is best to send data using RecordBatch
 enum MessageHeader : uint8_t {
-  MessageHeader_NONE   = 0,
-  MessageHeader_Schema = 1,
-  MessageHeader_MIN    = MessageHeader_NONE,
-  MessageHeader_MAX    = MessageHeader_Schema
+  MessageHeader_NONE            = 0,
+  MessageHeader_Schema          = 1,
+  MessageHeader_DictionaryBatch = 2,
+  MessageHeader_RecordBatch     = 3,
+  MessageHeader_MIN             = MessageHeader_NONE,
+  MessageHeader_MAX             = MessageHeader_RecordBatch
 };
 
-inline const MessageHeader (&EnumValuesMessageHeader())[2]
+inline MessageHeader const (&EnumValuesMessageHeader())[4]
 {
-  static const MessageHeader values[] = {MessageHeader_NONE, MessageHeader_Schema};
+  static MessageHeader const values[] = {MessageHeader_NONE,
+                                         MessageHeader_Schema,
+                                         MessageHeader_DictionaryBatch,
+                                         MessageHeader_RecordBatch};
   return values;
 }
 
-inline const char* const* EnumNamesMessageHeader()
+inline char const* const* EnumNamesMessageHeader()
 {
-  static const char* const names[3] = {"NONE", "Schema", nullptr};
+  static char const* const names[5] = {"NONE", "Schema", "DictionaryBatch", "RecordBatch", nullptr};
   return names;
 }
 
-inline const char* EnumNameMessageHeader(MessageHeader e)
+inline char const* EnumNameMessageHeader(MessageHeader e)
 {
-  if (::flatbuffers::IsOutRange(e, MessageHeader_NONE, MessageHeader_Schema)) return "";
-  const size_t index = static_cast<size_t>(e);
+  if (::flatbuffers::IsOutRange(e, MessageHeader_NONE, MessageHeader_RecordBatch)) return "";
+  size_t const index = static_cast<size_t>(e);
   return EnumNamesMessageHeader()[index];
 }
 
 template <typename T>
 struct MessageHeaderTraits {
-  static const MessageHeader enum_value = MessageHeader_NONE;
+  static MessageHeader const enum_value = MessageHeader_NONE;
 };
 
 template <>
 struct MessageHeaderTraits<cudf::io::parquet::flatbuf::Schema> {
-  static const MessageHeader enum_value = MessageHeader_Schema;
+  static MessageHeader const enum_value = MessageHeader_Schema;
 };
 
-bool VerifyMessageHeader(::flatbuffers::Verifier& verifier, const void* obj, MessageHeader type);
+template <>
+struct MessageHeaderTraits<cudf::io::parquet::flatbuf::DictionaryBatch> {
+  static MessageHeader const enum_value = MessageHeader_DictionaryBatch;
+};
+
+template <>
+struct MessageHeaderTraits<cudf::io::parquet::flatbuf::RecordBatch> {
+  static MessageHeader const enum_value = MessageHeader_RecordBatch;
+};
+
+bool VerifyMessageHeader(::flatbuffers::Verifier& verifier, void const* obj, MessageHeader type);
 bool VerifyMessageHeaderVector(::flatbuffers::Verifier& verifier,
-                               const ::flatbuffers::Vector<::flatbuffers::Offset<void>>* values,
-                               const ::flatbuffers::Vector<uint8_t>* types);
+                               ::flatbuffers::Vector<::flatbuffers::Offset<void>> const* values,
+                               ::flatbuffers::Vector<uint8_t> const* types);
 
 /// ----------------------------------------------------------------------
 /// Data structures for describing a table row batch (a collection of
@@ -218,7 +233,7 @@ struct BodyCompressionBuilder {
   }
   ::flatbuffers::Offset<BodyCompression> Finish()
   {
-    const auto end = fbb_.EndTable(start_);
+    auto const end = fbb_.EndTable(start_);
     auto o         = ::flatbuffers::Offset<BodyCompression>(end);
     return o;
   }
@@ -253,9 +268,9 @@ struct RecordBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// length
   int64_t length() const { return GetField<int64_t>(VT_LENGTH, 0); }
   /// Nodes correspond to the pre-ordered flattened logical schema
-  const ::flatbuffers::Vector<const cudf::io::parquet::flatbuf::FieldNode*>* nodes() const
+  ::flatbuffers::Vector<cudf::io::parquet::flatbuf::FieldNode const*> const* nodes() const
   {
-    return GetPointer<const ::flatbuffers::Vector<const cudf::io::parquet::flatbuf::FieldNode*>*>(
+    return GetPointer<::flatbuffers::Vector<cudf::io::parquet::flatbuf::FieldNode const*> const*>(
       VT_NODES);
   }
   /// Buffers correspond to the pre-ordered flattened buffer tree
@@ -264,15 +279,15 @@ struct RecordBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// example, most primitive arrays will have 2 buffers, 1 for the validity
   /// bitmap and 1 for the values. For struct arrays, there will only be a
   /// single buffer for the validity (nulls) bitmap
-  const ::flatbuffers::Vector<const cudf::io::parquet::flatbuf::Buffer*>* buffers() const
+  ::flatbuffers::Vector<cudf::io::parquet::flatbuf::Buffer const*> const* buffers() const
   {
-    return GetPointer<const ::flatbuffers::Vector<const cudf::io::parquet::flatbuf::Buffer*>*>(
+    return GetPointer<::flatbuffers::Vector<cudf::io::parquet::flatbuf::Buffer const*> const*>(
       VT_BUFFERS);
   }
   /// Optional compression of the message body
-  const cudf::io::parquet::flatbuf::BodyCompression* compression() const
+  cudf::io::parquet::flatbuf::BodyCompression const* compression() const
   {
-    return GetPointer<const cudf::io::parquet::flatbuf::BodyCompression*>(VT_COMPRESSION);
+    return GetPointer<cudf::io::parquet::flatbuf::BodyCompression const*>(VT_COMPRESSION);
   }
   /// Some types such as Utf8View are represented using a variable number of buffers.
   /// For each such Field in the pre-ordered flattened logical schema, there will be
@@ -288,9 +303,9 @@ struct RecordBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   ///
   /// This field may be omitted if and only if the schema contains no Fields with
   /// a variable number of buffers, such as BinaryView and Utf8View.
-  const ::flatbuffers::Vector<int64_t>* variadicBufferCounts() const
+  ::flatbuffers::Vector<int64_t> const* variadicBufferCounts() const
   {
-    return GetPointer<const ::flatbuffers::Vector<int64_t>*>(VT_VARIADICBUFFERCOUNTS);
+    return GetPointer<::flatbuffers::Vector<int64_t> const*>(VT_VARIADICBUFFERCOUNTS);
   }
   bool Verify(::flatbuffers::Verifier& verifier) const
   {
@@ -309,13 +324,13 @@ struct RecordBatchBuilder {
   ::flatbuffers::uoffset_t start_;
   void add_length(int64_t length) { fbb_.AddElement<int64_t>(RecordBatch::VT_LENGTH, length, 0); }
   void add_nodes(
-    ::flatbuffers::Offset<::flatbuffers::Vector<const cudf::io::parquet::flatbuf::FieldNode*>>
+    ::flatbuffers::Offset<::flatbuffers::Vector<cudf::io::parquet::flatbuf::FieldNode const*>>
       nodes)
   {
     fbb_.AddOffset(RecordBatch::VT_NODES, nodes);
   }
   void add_buffers(
-    ::flatbuffers::Offset<::flatbuffers::Vector<const cudf::io::parquet::flatbuf::Buffer*>> buffers)
+    ::flatbuffers::Offset<::flatbuffers::Vector<cudf::io::parquet::flatbuf::Buffer const*>> buffers)
   {
     fbb_.AddOffset(RecordBatch::VT_BUFFERS, buffers);
   }
@@ -335,7 +350,7 @@ struct RecordBatchBuilder {
   }
   ::flatbuffers::Offset<RecordBatch> Finish()
   {
-    const auto end = fbb_.EndTable(start_);
+    auto const end = fbb_.EndTable(start_);
     auto o         = ::flatbuffers::Offset<RecordBatch>(end);
     return o;
   }
@@ -344,9 +359,9 @@ struct RecordBatchBuilder {
 inline ::flatbuffers::Offset<RecordBatch> CreateRecordBatch(
   ::flatbuffers::FlatBufferBuilder& _fbb,
   int64_t length = 0,
-  ::flatbuffers::Offset<::flatbuffers::Vector<const cudf::io::parquet::flatbuf::FieldNode*>> nodes =
+  ::flatbuffers::Offset<::flatbuffers::Vector<cudf::io::parquet::flatbuf::FieldNode const*>> nodes =
     0,
-  ::flatbuffers::Offset<::flatbuffers::Vector<const cudf::io::parquet::flatbuf::Buffer*>> buffers =
+  ::flatbuffers::Offset<::flatbuffers::Vector<cudf::io::parquet::flatbuf::Buffer const*>> buffers =
     0,
   ::flatbuffers::Offset<cudf::io::parquet::flatbuf::BodyCompression> compression = 0,
   ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> variadicBufferCounts     = 0)
@@ -363,10 +378,10 @@ inline ::flatbuffers::Offset<RecordBatch> CreateRecordBatch(
 inline ::flatbuffers::Offset<RecordBatch> CreateRecordBatchDirect(
   ::flatbuffers::FlatBufferBuilder& _fbb,
   int64_t length                                                                 = 0,
-  const std::vector<cudf::io::parquet::flatbuf::FieldNode>* nodes                = nullptr,
-  const std::vector<cudf::io::parquet::flatbuf::Buffer>* buffers                 = nullptr,
+  std::vector<cudf::io::parquet::flatbuf::FieldNode> const* nodes                = nullptr,
+  std::vector<cudf::io::parquet::flatbuf::Buffer> const* buffers                 = nullptr,
   ::flatbuffers::Offset<cudf::io::parquet::flatbuf::BodyCompression> compression = 0,
-  const std::vector<int64_t>* variadicBufferCounts                               = nullptr)
+  std::vector<int64_t> const* variadicBufferCounts                               = nullptr)
 {
   auto nodes__ =
     nodes ? _fbb.CreateVectorOfStructs<cudf::io::parquet::flatbuf::FieldNode>(*nodes) : 0;
@@ -392,9 +407,9 @@ struct DictionaryBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_ISDELTA = 8
   };
   int64_t id() const { return GetField<int64_t>(VT_ID, 0); }
-  const cudf::io::parquet::flatbuf::RecordBatch* data() const
+  cudf::io::parquet::flatbuf::RecordBatch const* data() const
   {
-    return GetPointer<const cudf::io::parquet::flatbuf::RecordBatch*>(VT_DATA);
+    return GetPointer<cudf::io::parquet::flatbuf::RecordBatch const*>(VT_DATA);
   }
   /// If isDelta is true the values in the dictionary are to be appended to a
   /// dictionary with the indicated id. If isDelta is false this dictionary
@@ -427,7 +442,7 @@ struct DictionaryBatchBuilder {
   }
   ::flatbuffers::Offset<DictionaryBatch> Finish()
   {
-    const auto end = fbb_.EndTable(start_);
+    auto const end = fbb_.EndTable(start_);
     auto o         = ::flatbuffers::Offset<DictionaryBatch>(end);
     return o;
   }
@@ -465,21 +480,33 @@ struct Message FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     return static_cast<cudf::io::parquet::flatbuf::MessageHeader>(
       GetField<uint8_t>(VT_HEADER_TYPE, 0));
   }
-  const void* header() const { return GetPointer<const void*>(VT_HEADER); }
+  void const* header() const { return GetPointer<void const*>(VT_HEADER); }
   template <typename T>
-  const T* header_as() const;
-  const cudf::io::parquet::flatbuf::Schema* header_as_Schema() const
+  T const* header_as() const;
+  cudf::io::parquet::flatbuf::Schema const* header_as_Schema() const
   {
     return header_type() == cudf::io::parquet::flatbuf::MessageHeader_Schema
-             ? static_cast<const cudf::io::parquet::flatbuf::Schema*>(header())
+             ? static_cast<cudf::io::parquet::flatbuf::Schema const*>(header())
+             : nullptr;
+  }
+  cudf::io::parquet::flatbuf::DictionaryBatch const* header_as_DictionaryBatch() const
+  {
+    return header_type() == cudf::io::parquet::flatbuf::MessageHeader_DictionaryBatch
+             ? static_cast<cudf::io::parquet::flatbuf::DictionaryBatch const*>(header())
+             : nullptr;
+  }
+  cudf::io::parquet::flatbuf::RecordBatch const* header_as_RecordBatch() const
+  {
+    return header_type() == cudf::io::parquet::flatbuf::MessageHeader_RecordBatch
+             ? static_cast<cudf::io::parquet::flatbuf::RecordBatch const*>(header())
              : nullptr;
   }
   int64_t bodyLength() const { return GetField<int64_t>(VT_BODYLENGTH, 0); }
-  const ::flatbuffers::Vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>>*
+  ::flatbuffers::Vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>> const*
   custom_metadata() const
   {
     return GetPointer<
-      const ::flatbuffers::Vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>>*>(
+      ::flatbuffers::Vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>> const*>(
       VT_CUSTOM_METADATA);
   }
   bool Verify(::flatbuffers::Verifier& verifier) const
@@ -494,10 +521,24 @@ struct Message FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
 };
 
 template <>
-inline const cudf::io::parquet::flatbuf::Schema*
+inline cudf::io::parquet::flatbuf::Schema const*
 Message::header_as<cudf::io::parquet::flatbuf::Schema>() const
 {
   return header_as_Schema();
+}
+
+template <>
+inline cudf::io::parquet::flatbuf::DictionaryBatch const*
+Message::header_as<cudf::io::parquet::flatbuf::DictionaryBatch>() const
+{
+  return header_as_DictionaryBatch();
+}
+
+template <>
+inline cudf::io::parquet::flatbuf::RecordBatch const*
+Message::header_as<cudf::io::parquet::flatbuf::RecordBatch>() const
+{
+  return header_as_RecordBatch();
 }
 
 struct MessageBuilder {
@@ -533,7 +574,7 @@ struct MessageBuilder {
   }
   ::flatbuffers::Offset<Message> Finish()
   {
-    const auto end = fbb_.EndTable(start_);
+    auto const end = fbb_.EndTable(start_);
     auto o         = ::flatbuffers::Offset<Message>(end);
     return o;
   }
@@ -567,7 +608,7 @@ inline ::flatbuffers::Offset<Message> CreateMessageDirect(
     cudf::io::parquet::flatbuf::MessageHeader_NONE,
   ::flatbuffers::Offset<void> header = 0,
   int64_t bodyLength                 = 0,
-  const std::vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>>* custom_metadata =
+  std::vector<::flatbuffers::Offset<cudf::io::parquet::flatbuf::KeyValue>> const* custom_metadata =
     nullptr)
 {
   auto custom_metadata__ =
@@ -580,7 +621,7 @@ inline ::flatbuffers::Offset<Message> CreateMessageDirect(
 }
 
 inline bool VerifyMessageHeader(::flatbuffers::Verifier& verifier,
-                                const void* obj,
+                                void const* obj,
                                 MessageHeader type)
 {
   switch (type) {
@@ -588,7 +629,15 @@ inline bool VerifyMessageHeader(::flatbuffers::Verifier& verifier,
       return true;
     }
     case MessageHeader_Schema: {
-      auto ptr = reinterpret_cast<const cudf::io::parquet::flatbuf::Schema*>(obj);
+      auto ptr = reinterpret_cast<cudf::io::parquet::flatbuf::Schema const*>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case MessageHeader_DictionaryBatch: {
+      auto ptr = reinterpret_cast<cudf::io::parquet::flatbuf::DictionaryBatch const*>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case MessageHeader_RecordBatch: {
+      auto ptr = reinterpret_cast<cudf::io::parquet::flatbuf::RecordBatch const*>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;
@@ -597,8 +646,8 @@ inline bool VerifyMessageHeader(::flatbuffers::Verifier& verifier,
 
 inline bool VerifyMessageHeaderVector(
   ::flatbuffers::Verifier& verifier,
-  const ::flatbuffers::Vector<::flatbuffers::Offset<void>>* values,
-  const ::flatbuffers::Vector<uint8_t>* types)
+  ::flatbuffers::Vector<::flatbuffers::Offset<void>> const* values,
+  ::flatbuffers::Vector<uint8_t> const* types)
 {
   if (!values || !types) return !values && !types;
   if (values->size() != types->size()) return false;
@@ -610,12 +659,12 @@ inline bool VerifyMessageHeaderVector(
   return true;
 }
 
-inline const cudf::io::parquet::flatbuf::Message* GetMessage(const void* buf)
+inline cudf::io::parquet::flatbuf::Message const* GetMessage(void const* buf)
 {
   return ::flatbuffers::GetRoot<cudf::io::parquet::flatbuf::Message>(buf);
 }
 
-inline const cudf::io::parquet::flatbuf::Message* GetSizePrefixedMessage(const void* buf)
+inline cudf::io::parquet::flatbuf::Message const* GetSizePrefixedMessage(void const* buf)
 {
   return ::flatbuffers::GetSizePrefixedRoot<cudf::io::parquet::flatbuf::Message>(buf);
 }

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2018-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import warnings
+from contextlib import contextmanager
 from string import ascii_letters
 
 import numpy as np
@@ -74,3 +76,159 @@ def test_feather_writer(tmp_path, pdf):
             expect.column(idx).cast(got.schema.field(idx).type),
         )
     assert pa.Table.equals(expect, got)
+
+
+def _nullable_pdf(nrows):
+    rng = np.random.default_rng(seed=0)
+    nulls = rng.random(nrows) < 0.1
+
+    def masked(values, dtype):
+        return pd.Series(values, dtype=dtype).mask(nulls)
+
+    return pd.DataFrame(
+        {
+            "int8": masked(rng.integers(-100, 100, nrows), "Int8"),
+            "int64": pd.Series(
+                rng.integers(-(2**40), 2**40, nrows), dtype="Int64"
+            ),
+            "uint32": masked(rng.integers(0, 2**32 - 1, nrows), "UInt32"),
+            "float64": masked(rng.random(nrows), "Float64"),
+            "bool": masked(rng.random(nrows) > 0.5, "boolean"),
+            "string": masked(
+                [f"s{i % 1000}" * (i % 5) for i in range(nrows)], "string"
+            ),
+            "timestamp": masked(
+                rng.integers(0, 2**40, nrows).astype("datetime64[ms]"), None
+            ),
+        }
+    )
+
+
+def _cpu_read(fname):
+    # Ignores the pandas metadata, which would restore pandas nullable dtypes
+    return cudf.DataFrame.from_arrow(pa.ipc.open_file(fname).read_all())
+
+
+def _nullable_gdf(nrows):
+    # Via Arrow, so that the frame does not remember the pandas nullable dtypes
+    return cudf.DataFrame.from_arrow(
+        pa.Table.from_pandas(_nullable_pdf(nrows), preserve_index=False)
+    )
+
+
+@contextmanager
+def _no_cpu_fallback():
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error", message="Using CPU", category=UserWarning
+        )
+        yield
+
+
+# Small enough that PyArrow writes every LZ4 buffer as a single frame block,
+# which the GPU reader requires
+@pytest.mark.parametrize("compression", ["lz4", "zstd", "uncompressed"])
+@pytest.mark.parametrize("chunksize", [None, 300])
+def test_feather_pandas_writer_cudf_reader(tmp_path, compression, chunksize):
+    pdf = _nullable_pdf(1000)
+    fname = tmp_path / "pandas.feather"
+    pdf.to_feather(fname, compression=compression, chunksize=chunksize)
+
+    with _no_cpu_fallback():
+        got = cudf.read_feather(fname)
+
+    assert_eq(_cpu_read(fname), got)
+
+
+def test_feather_pandas_writer_cudf_reader_columns(tmp_path):
+    pdf = _nullable_pdf(1000)
+    fname = tmp_path / "pandas.feather"
+    pdf.to_feather(fname, compression="zstd")
+    columns = ["string", "int8"]
+
+    with _no_cpu_fallback():
+        got = cudf.read_feather(fname, columns=columns)
+
+    assert_eq(_cpu_read(fname)[columns], got)
+
+
+def test_feather_pandas_writer_cudf_reader_linked_lz4_fallback(tmp_path):
+    pdf = _nullable_pdf(100_000)
+    fname = tmp_path / "pandas.feather"
+    pdf.to_feather(fname, compression="lz4")
+
+    with pytest.warns(UserWarning, match="linked blocks"):
+        got = cudf.read_feather(fname)
+
+    assert_eq(_cpu_read(fname), got)
+
+
+@pytest.mark.parametrize("compression", [None, "lz4", "zstd", "uncompressed"])
+@pytest.mark.parametrize("chunksize", [None, 30_000])
+def test_feather_cudf_writer_pandas_reader(tmp_path, compression, chunksize):
+    gdf = _nullable_gdf(100_000)
+    fname = tmp_path / "cudf.feather"
+
+    with _no_cpu_fallback():
+        gdf.to_feather(fname, compression=compression, chunksize=chunksize)
+
+    assert_eq(gdf.to_pandas(), pd.read_feather(fname))
+
+
+@pytest.mark.parametrize("compression", [None, "zstd", "uncompressed"])
+def test_feather_cudf_writer_cudf_reader(tmp_path, compression):
+    gdf = _nullable_gdf(100_000)
+    fname = tmp_path / "cudf.feather"
+
+    with _no_cpu_fallback():
+        gdf.to_feather(fname, compression=compression)
+        got = cudf.read_feather(fname)
+
+    assert_eq(gdf, got)
+
+
+def _nested_gdf(nrows):
+    rng = np.random.default_rng(seed=0)
+    valid = rng.random(nrows) > 0.1
+    return cudf.DataFrame(
+        {
+            "duration": cudf.Series(
+                rng.integers(0, 2**40, nrows).astype("timedelta64[ms]")
+            ),
+            "list": [
+                [i * j for j in range(i % 4)] if valid[i] else None
+                for i in range(nrows)
+            ],
+            "struct": [
+                {"a": i, "b": f"s{i}"} if valid[i] else None
+                for i in range(nrows)
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("compression", [None, "zstd", "uncompressed"])
+def test_feather_cudf_writer_pyarrow_reader_nested(tmp_path, compression):
+    gdf = _nested_gdf(10_000)
+    fname = tmp_path / "cudf.feather"
+
+    with _no_cpu_fallback():
+        gdf.to_feather(fname, compression=compression)
+
+    got = pa.ipc.open_file(fname).read_all()
+    assert got.equals(gdf.to_arrow(preserve_index=False))
+
+
+@pytest.mark.parametrize("compression", ["zstd", None])
+def test_feather_pyarrow_writer_cudf_reader_nested(tmp_path, compression):
+    expected = _nested_gdf(10_000)
+    table = expected.to_arrow(preserve_index=False)
+    fname = tmp_path / "pyarrow.feather"
+    options = pa.ipc.IpcWriteOptions(compression=compression)
+    with pa.ipc.new_file(str(fname), table.schema, options=options) as writer:
+        writer.write_table(table)
+
+    with _no_cpu_fallback():
+        got = cudf.read_feather(fname)
+
+    assert_eq(expected, got)

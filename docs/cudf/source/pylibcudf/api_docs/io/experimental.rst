@@ -6,3 +6,9 @@ APIs in this namespace are experimental and may change without warning in the fu
 
 .. automodule:: pylibcudf.io.experimental
    :members:
+
+Feather
+-------
+
+.. automodule:: pylibcudf.io.experimental.feather
+   :members:

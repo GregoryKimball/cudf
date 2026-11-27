@@ -21,6 +21,7 @@
 #include <cudf/io/detail/parquet.hpp>
 #include <cudf/io/detail/utils.hpp>
 #include <cudf/io/experimental/cudftable.hpp>
+#include <cudf/io/experimental/feather.hpp>
 #include <cudf/io/json.hpp>
 #include <cudf/io/orc.hpp>
 #include <cudf/io/orc_metadata.hpp>
@@ -1308,6 +1309,19 @@ chunked_parquet_writer_options_builder::chunked_parquet_writer_options_builder(
 {
 }
 
+namespace feather::detail {
+void write_feather(data_sink* sink,
+                   table_view const& table,
+                   std::vector<column_name_info> const& column_names,
+                   compression_type compression,
+                   size_type max_rows_per_batch,
+                   cuda::stream_ref stream);
+table_with_metadata read_feather(datasource* source,
+                                 std::optional<std::vector<std::string>> const& columns,
+                                 cuda::stream_ref stream,
+                                 cudf::memory_resources mr);
+}  // namespace feather::detail
+
 namespace experimental {
 
 // Forward declarations for detail functions
@@ -1342,6 +1356,71 @@ packed_table read_cudftable(cudftable_reader_options const& options,
   CUDF_EXPECTS(datasources.size() == 1, "CudfTable format only supports single source");
 
   return detail::read_cudftable(datasources[0].get(), stream, mr);
+}
+
+void feather_writer_options::set_compression(compression_type compression)
+{
+  CUDF_EXPECTS(compression == compression_type::NONE || compression == compression_type::LZ4 ||
+                 compression == compression_type::ZSTD,
+               "Feather only supports NONE, LZ4 and ZSTD compression");
+  _compression = compression;
+}
+
+void feather_writer_options::set_max_rows_per_batch(size_type rows)
+{
+  CUDF_EXPECTS(rows > 0, "Feather record batches must contain at least one row");
+  _max_rows_per_batch = rows;
+}
+
+feather_writer_options_builder feather_writer_options::builder(sink_info const& sink,
+                                                               table_view const& table)
+{
+  return feather_writer_options_builder(sink, table);
+}
+
+feather_reader_options_builder feather_reader_options::builder(source_info src)
+{
+  return feather_reader_options_builder(std::move(src));
+}
+
+/**
+ * @copydoc cudf::io::experimental::write_feather
+ */
+void write_feather(feather_writer_options const& options, cuda::stream_ref stream)
+{
+  CUDF_FUNC_RANGE();
+
+  auto sinks = make_datasinks(options.get_sink());
+  CUDF_EXPECTS(sinks.size() == 1, "Feather format only supports single sink");
+
+  auto column_names = options.get_column_metadata();
+  if (column_names.empty()) {
+    std::transform(options.get_column_names().begin(),
+                   options.get_column_names().end(),
+                   std::back_inserter(column_names),
+                   [](auto const& name) { return column_name_info{name}; });
+  }
+  feather::detail::write_feather(sinks[0].get(),
+                                 options.get_table(),
+                                 column_names,
+                                 options.get_compression(),
+                                 options.get_max_rows_per_batch(),
+                                 stream);
+}
+
+/**
+ * @copydoc cudf::io::experimental::read_feather
+ */
+table_with_metadata read_feather(feather_reader_options const& options,
+                                 cuda::stream_ref stream,
+                                 cudf::memory_resources mr)
+{
+  CUDF_FUNC_RANGE();
+
+  auto datasources = make_datasources(options.get_source());
+  CUDF_EXPECTS(datasources.size() == 1, "Feather format only supports single source");
+
+  return feather::detail::read_feather(datasources[0].get(), options.get_columns(), stream, mr);
 }
 
 }  // namespace experimental
